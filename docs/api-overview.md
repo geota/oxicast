@@ -25,6 +25,7 @@ let client = CastClient::builder("192.168.1.100", 8009)
     .reconnect_delay(Duration::from_secs(2))
     .verify_tls(false)
     .event_buffer_size(64)
+    .adopt_broadcast_media_sessions(true)
     .connect()
     .await?;
 ```

@@ -107,7 +107,11 @@ pub(crate) async fn route(
                     MediaMessageType::Status => {
                         if let Some(status) = parse_media_status(&json) {
                             // Update tracked media session ID from broadcasts
-                            if status.media_session_id > 0 {
+                            if status.media_session_id > 0
+                                && state
+                                    .adopt_broadcast_media_sessions
+                                    .load(std::sync::atomic::Ordering::Relaxed)
+                            {
                                 state.set_media_session_id(status.media_session_id);
                             }
 

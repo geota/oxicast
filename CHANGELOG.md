@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `CastClientBuilder::adopt_broadcast_media_sessions` (default `true`, unchanged behaviour). With `false`, media commands keep targeting the media session this client loaded or joined instead of switching to any session announced in a `MEDIA_STATUS` broadcast, so a client never ends up controlling media another sender loaded on the same app.
+
+### Fixed
+- A load the device rejects (an `IDLE` reply with no media) no longer replaces the media session that commands target.
+
 ## [0.0.5] - 2026-11-11
 
 ### Added
