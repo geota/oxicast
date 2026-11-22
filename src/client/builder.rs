@@ -1,7 +1,11 @@
 //! Builder for CastClient with advanced configuration.
 
 use crate::CastClient;
+use crate::channel::ns;
+use crate::client::framing;
 use crate::error::Result;
+use crate::proto::CastMessage;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Builder for creating a [`CastClient`] with custom configuration.
@@ -18,6 +22,28 @@ pub struct CastClientBuilder {
     pub(crate) reconnect_delay: Duration,
     pub(crate) event_buffer_size: usize,
     pub(crate) verify_tls: bool,
+    pub(crate) first_message: Option<FirstMessage>,
+}
+
+/// A binary message sent before any other on every connection
+/// (see [`CastClientBuilder::first_message`]).
+#[derive(Clone)]
+pub(crate) struct FirstMessage {
+    namespace: String,
+    destination: String,
+    payload: Arc<dyn Fn() -> Vec<u8> + Send + Sync>,
+}
+
+impl FirstMessage {
+    /// Build the message for a new connection, with a fresh payload.
+    pub(crate) fn build(&self) -> CastMessage {
+        framing::build_binary_message(
+            &self.namespace,
+            ns::SENDER_ID,
+            &self.destination,
+            (self.payload)(),
+        )
+    }
 }
 
 impl CastClientBuilder {
@@ -35,6 +61,7 @@ impl CastClientBuilder {
             reconnect_delay: Duration::from_secs(2),
             event_buffer_size: 64,
             verify_tls: false,
+            first_message: None,
         }
     }
 
@@ -96,6 +123,41 @@ impl CastClientBuilder {
     /// Default: `false` (Cast devices use self-signed certificates).
     pub fn verify_tls(mut self, verify: bool) -> Self {
         self.verify_tls = verify;
+        self
+    }
+
+    /// Send a message with a binary payload before any other message on every
+    /// connection, including reconnections.
+    ///
+    /// `payload` is called once per connection, right after the TLS handshake,
+    /// so each connection can carry fresh content such as a nonce. The message
+    /// is sent ahead of the `CONNECT` to `receiver-0`, heartbeats and any
+    /// command. Cast senders send their device-authentication challenge this way:
+    /// a `DeviceAuthMessage` on `urn:x-cast:com.google.cast.tp.deviceauth` to
+    /// `receiver-0`. Replies arrive as [`CastEvent::RawBinaryMessage`](crate::CastEvent::RawBinaryMessage).
+    ///
+    /// ```no_run
+    /// # async fn example() -> oxicast::Result<()> {
+    /// let client = oxicast::CastClient::builder("192.168.1.100", 8009)
+    ///     .first_message("urn:x-cast:com.google.cast.tp.deviceauth", "receiver-0", || {
+    ///         vec![/* an encoded DeviceAuthMessage with a fresh nonce */]
+    ///     })
+    ///     .connect()
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn first_message(
+        mut self,
+        namespace: impl Into<String>,
+        destination: impl Into<String>,
+        payload: impl Fn() -> Vec<u8> + Send + Sync + 'static,
+    ) -> Self {
+        self.first_message = Some(FirstMessage {
+            namespace: namespace.into(),
+            destination: destination.into(),
+            payload: Arc::new(payload),
+        });
         self
     }
 

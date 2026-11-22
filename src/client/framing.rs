@@ -95,6 +95,26 @@ pub fn build_message(
     }
 }
 
+/// Build a CastMessage with a binary payload.
+pub fn build_binary_message(
+    namespace: &str,
+    source: &str,
+    destination: &str,
+    payload: Vec<u8>,
+) -> CastMessage {
+    CastMessage {
+        protocol_version: crate::proto::cast_message::ProtocolVersion::Castv210 as i32,
+        source_id: source.to_string(),
+        destination_id: destination.to_string(),
+        namespace: namespace.to_string(),
+        payload_type: crate::proto::cast_message::PayloadType::Binary as i32,
+        payload_utf8: None,
+        payload_binary: Some(payload),
+        continued: None,
+        remaining_length: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -118,6 +138,26 @@ mod tests {
         assert_eq!(decoded.payload_utf8, msg.payload_utf8);
         assert_eq!(decoded.source_id, msg.source_id);
         assert_eq!(decoded.destination_id, msg.destination_id);
+    }
+
+    #[tokio::test]
+    async fn test_binary_roundtrip() {
+        let msg = build_binary_message(
+            "urn:x-cast:com.google.cast.tp.deviceauth",
+            "sender-0",
+            "receiver-0",
+            vec![0, 1, 2, 0xFF],
+        );
+
+        let mut buf = Vec::new();
+        write_message(&mut buf, &msg).await.unwrap();
+
+        let mut cursor = std::io::Cursor::new(buf);
+        let decoded = read_message(&mut cursor).await.unwrap();
+
+        assert_eq!(decoded.payload_type, crate::proto::cast_message::PayloadType::Binary as i32);
+        assert_eq!(decoded.payload_binary.as_deref(), Some(&[0, 1, 2, 0xFF][..]));
+        assert_eq!(decoded.payload_utf8, None);
     }
 
     #[tokio::test]

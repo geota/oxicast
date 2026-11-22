@@ -124,6 +124,7 @@ pub(crate) struct ClientConfig {
     pub heartbeat_timeout: std::time::Duration,
     pub connect_timeout: std::time::Duration,
     pub verify_tls: bool,
+    pub first_message: Option<builder::FirstMessage>,
 }
 
 struct ClientInner {
@@ -189,6 +190,10 @@ impl CastClient {
 
         // Create channels and shared state
         let (write_tx, write_rx) = mpsc::channel::<crate::proto::CastMessage>(64);
+        // Queued before any task starts, so nothing can be sent ahead of it.
+        if let Some(first) = &config.first_message {
+            write_tx.try_send(first.build()).map_err(|_| Error::Disconnected)?;
+        }
         let (event_tx, event_rx) = mpsc::channel::<CastEvent>(config.event_buffer_size);
         let request_tracker = Arc::new(RequestTracker::new(config.request_timeout));
         let (state_holder, watchers) = state::new_state();
@@ -257,6 +262,7 @@ impl CastClient {
             heartbeat_timeout: config.heartbeat_timeout,
             connect_timeout: config.connect_timeout,
             verify_tls: config.verify_tls,
+            first_message: config.first_message.clone(),
         };
 
         let client = Self {
@@ -435,6 +441,10 @@ impl CastClient {
         // Event channels are NOT replaced — the same event_tx/event_rx pair stays alive
         // across reconnects so next_event() never sees a spurious None.
         let (new_write_tx, new_write_rx) = mpsc::channel::<crate::proto::CastMessage>(64);
+        // Queued before any task starts, so nothing can be sent ahead of it.
+        if let Some(first) = &config.first_message {
+            new_write_tx.try_send(first.build()).map_err(|_| Error::Disconnected)?;
+        }
         let cancel = self.inner.parent_cancel.child_token();
 
         *self.inner.write_tx.write().await = new_write_tx.clone();
@@ -904,6 +914,23 @@ impl CastClient {
         self.send(msg).await
     }
 
+    /// Send a message with a binary payload, without waiting for a response.
+    ///
+    /// Binary payloads carry no `requestId`, so there is nothing to correlate a
+    /// reply with: replies arrive as [`CastEvent::RawBinaryMessage`]. To send a
+    /// binary message before anything else on a connection, such as a
+    /// device-authentication challenge, use the builder's `first_message`
+    /// (see [`builder()`](Self::builder)).
+    pub async fn send_raw_binary(
+        &self,
+        namespace: &str,
+        destination: &str,
+        payload: Vec<u8>,
+    ) -> Result<()> {
+        let msg = framing::build_binary_message(namespace, "sender-0", destination, payload);
+        self.send(msg).await
+    }
+
     // ── Internal ─────────────────────────────────────────────
 
     async fn send(&self, msg: crate::proto::CastMessage) -> Result<()> {
@@ -975,8 +1002,11 @@ struct PayloadSummary {
 }
 
 impl PayloadSummary {
-    fn of(payload: Option<&str>) -> Self {
-        let payload = payload.unwrap_or("");
+    fn of(msg: &crate::proto::CastMessage) -> Self {
+        if let Some(binary) = &msg.payload_binary {
+            return Self { kind: String::new(), request_id: 0, len: binary.len() };
+        }
+        let payload = msg.payload_utf8.as_deref().unwrap_or("");
         let json = serde_json::from_str::<serde_json::Value>(payload).ok();
         let field = |k: &str| json.as_ref().and_then(|j| j.get(k).cloned());
         Self {
@@ -1010,7 +1040,7 @@ async fn writer_loop(
             msg = rx.recv() => {
                 match msg {
                     Some(msg) => {
-                        let summary = PayloadSummary::of(msg.payload_utf8.as_deref());
+                        let summary = PayloadSummary::of(&msg);
                         tracing::trace!(
                             ns = %msg.namespace,
                             dst = %msg.destination_id,
@@ -1077,7 +1107,7 @@ async fn reader_loop(mut reader: ReadHalf<TlsStream<TcpStream>>, ctx: ReaderCont
                 match result {
                     Ok(msg) => {
                         heartbeat::touch(&ctx.last_activity);
-                        let summary = PayloadSummary::of(msg.payload_utf8.as_deref());
+                        let summary = PayloadSummary::of(&msg);
                         tracing::trace!(
                             ns = %msg.namespace,
                             src = %msg.source_id,

@@ -27,6 +27,12 @@ let client = CastClient::builder("192.168.1.100", 8009)
     .event_buffer_size(64)
     .connect()
     .await?;
+
+// A binary message sent first on every connection, e.g. a device-auth challenge
+let client = CastClient::builder("192.168.1.100", 8009)
+    .first_message("urn:x-cast:com.google.cast.tp.deviceauth", "receiver-0", || challenge())
+    .connect()
+    .await?;
 ```
 
 | Method | Returns | Description |
@@ -177,6 +183,7 @@ let receiver_rx = client.watch_receiver_status(); // watch::Receiver<Option<Rece
 | `MediaSessionEnded { media_session_id, idle_reason }` | A media session ended |
 | `LoadFailed { item_id, detailed_error_code }` | The device failed to load media, also when it reports this after `load_media()` returned |
 | `RawMessage { namespace, source, destination, payload }` | Unhandled or custom namespace message |
+| `RawBinaryMessage { namespace, source, destination, payload }` | Any message with a binary payload (`Vec<u8>`) |
 
 ---
 
@@ -201,6 +208,14 @@ client.send_raw_no_reply(
 ```
 
 Custom namespace messages without a `requestId` arrive as `CastEvent::RawMessage`.
+
+Binary payloads (protobuf `payload_binary`) have no `requestId`, so they are sent without waiting and every binary message received arrives as `CastEvent::RawBinaryMessage`:
+
+```rust
+client.send_raw_binary("urn:x-cast:com.example.binary", &transport_id, bytes).await?;
+```
+
+To send a binary message before anything else on each connection, such as the device-authentication challenge, use the builder's `first_message` (see Connection).
 
 ---
 
