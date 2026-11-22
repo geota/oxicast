@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `CastClient::local_addr()` and `CastClient::peer_addr()`: the socket addresses of the connection to the device, updated on reconnect. On a host with several interfaces, `local_addr()` is the address the device reached this host on, which is the one to use in URLs for media served from this host.
+
 ## [0.0.5] - 2026-11-11
 
 ### Added

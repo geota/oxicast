@@ -236,3 +236,17 @@ async fn disconnect_reports_a_single_event_when_the_device_vanishes_meanwhile() 
     }
     assert_eq!(disconnects, vec![None], "only the terminal Disconnected(None) of disconnect()");
 }
+
+#[tokio::test]
+async fn reports_the_connection_addresses() {
+    let (port, _seen) = start_mock_receiver().await;
+    let client = connect(port).await;
+
+    assert_eq!(client.peer_addr(), std::net::SocketAddr::from(([127, 0, 0, 1], port)));
+    let local = client.local_addr();
+    assert_eq!(local.ip(), std::net::IpAddr::from([127, 0, 0, 1]));
+    assert_ne!(local.port(), port);
+
+    client.disconnect().await.expect("disconnect");
+    assert_eq!(client.local_addr(), local, "keeps the last connection's address after close");
+}

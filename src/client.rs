@@ -152,6 +152,25 @@ struct ClientInner {
     transport_id: tokio::sync::Mutex<Option<String>>,
     /// Current app session ID.
     session_id: tokio::sync::Mutex<Option<String>>,
+    /// Local and peer address of the current connection, updated on reconnect.
+    addrs: std::sync::Mutex<ConnectionAddrs>,
+}
+
+/// The socket addresses of a connection to a device.
+#[derive(Clone, Copy, Debug)]
+struct ConnectionAddrs {
+    local: std::net::SocketAddr,
+    peer: std::net::SocketAddr,
+}
+
+impl ConnectionAddrs {
+    fn of(stream: &TlsStream<TcpStream>) -> Result<Self> {
+        let tcp = stream.get_ref().0;
+        Ok(Self {
+            local: tcp.local_addr().map_err(Error::Connect)?,
+            peer: tcp.peer_addr().map_err(Error::Connect)?,
+        })
+    }
 }
 
 impl Drop for ClientInner {
@@ -185,6 +204,7 @@ impl CastClient {
             config.connect_timeout,
         )
         .await?;
+        let addrs = ConnectionAddrs::of(&tls_stream)?;
         let (read_half, write_half) = io::split(tls_stream);
 
         // Create channels and shared state
@@ -276,6 +296,7 @@ impl CastClient {
                 last_activity,
                 transport_id: tokio::sync::Mutex::new(None),
                 session_id: tokio::sync::Mutex::new(None),
+                addrs: std::sync::Mutex::new(addrs),
             }),
         };
 
@@ -316,6 +337,21 @@ impl CastClient {
     /// Check if the connection is alive.
     pub fn is_connected(&self) -> bool {
         self.inner.alive.load(Ordering::Acquire)
+    }
+
+    /// The local address of the connection to the device.
+    ///
+    /// This is the address the device reached this host on, so it is usually
+    /// the right address to put in media URLs the device should fetch from a
+    /// server on this host. It is updated when the client reconnects; after
+    /// the connection closes it is the last connection's address.
+    pub fn local_addr(&self) -> std::net::SocketAddr {
+        self.inner.addrs.lock().unwrap_or_else(|e| e.into_inner()).local
+    }
+
+    /// The device's address on the current connection (see [`local_addr`](Self::local_addr)).
+    pub fn peer_addr(&self) -> std::net::SocketAddr {
+        self.inner.addrs.lock().unwrap_or_else(|e| e.into_inner()).peer
     }
 
     /// Disconnect from the device.
@@ -422,6 +458,7 @@ impl CastClient {
             config.connect_timeout,
         )
         .await?;
+        let addrs = ConnectionAddrs::of(&tls_stream)?;
         let (read_half, write_half) = io::split(tls_stream);
 
         // Re-check shutting_down after the TLS handshake. If disconnect() was
@@ -438,6 +475,7 @@ impl CastClient {
         let cancel = self.inner.parent_cancel.child_token();
 
         *self.inner.write_tx.write().await = new_write_tx.clone();
+        *self.inner.addrs.lock().unwrap_or_else(|e| e.into_inner()) = addrs;
         let event_tx = self.inner.event_tx.read().await.clone();
         self.inner.alive.store(true, Ordering::Release);
         self.inner.shutting_down.store(false, Ordering::Release);
