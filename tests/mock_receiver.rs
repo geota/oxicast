@@ -250,3 +250,86 @@ async fn reports_the_connection_addresses() {
     client.disconnect().await.expect("disconnect");
     assert_eq!(client.local_addr(), local, "keeps the last connection's address after close");
 }
+
+/// Joins app-1 (media session 11), then has the mock announce media session 99
+/// on app-1, as when another sender loads media, and pauses.
+async fn pause_after_another_sender_loads(client: &oxicast::CastClient) {
+    let status = client.receiver_status().await.expect("receiver status");
+    let app1 = status.applications.iter().find(|a| a.transport_id == "app-1").expect("app-1");
+    client.join_session(app1).await.expect("join").expect("media status");
+
+    let mut media = client.watch_media_status();
+    client
+        .send_raw_no_reply(
+            NS_TEST,
+            "receiver-0",
+            json!({"type": "BROADCAST_MEDIA_STATUS", "from": "app-1", "mediaSessionId": 99}),
+        )
+        .await
+        .expect("send broadcast trigger");
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        media.wait_for(|s| s.as_ref().is_some_and(|s| s.media_session_id == 99)),
+    )
+    .await
+    .expect("broadcast reported")
+    .expect("watch open");
+
+    client.pause().await.expect("pause");
+}
+
+#[tokio::test]
+async fn commands_follow_broadcast_media_sessions_by_default() {
+    let (port, mut seen) = start_mock_receiver().await;
+    let client = connect(port).await;
+
+    pause_after_another_sender_loads(&client).await;
+    let pause = expect_msg(&mut seen, |m| m.payload["type"] == "PAUSE").await;
+    assert_eq!(pause.payload["mediaSessionId"], 99);
+
+    client.disconnect().await.expect("disconnect");
+}
+
+#[tokio::test]
+async fn commands_keep_the_joined_media_session_when_not_adopting_broadcasts() {
+    let (port, mut seen) = start_mock_receiver().await;
+    let client = oxicast::CastClient::builder("127.0.0.1", port)
+        .request_timeout(Duration::from_secs(5))
+        .adopt_broadcast_media_sessions(false)
+        .connect()
+        .await
+        .expect("connect");
+
+    pause_after_another_sender_loads(&client).await;
+    let pause = expect_msg(&mut seen, |m| m.payload["type"] == "PAUSE").await;
+    assert_eq!(pause.payload["mediaSessionId"], 11, "must not follow another sender's session");
+
+    client.close().await.expect("close");
+}
+
+#[tokio::test]
+async fn a_rejected_load_does_not_replace_the_session_commands_target() {
+    let (port, mut seen) = start_mock_receiver().await;
+    let client = oxicast::CastClient::builder("127.0.0.1", port)
+        .request_timeout(Duration::from_secs(5))
+        .adopt_broadcast_media_sessions(false)
+        .connect()
+        .await
+        .expect("connect");
+
+    let status = client.receiver_status().await.expect("receiver status");
+    let app = status.applications.iter().find(|a| a.transport_id == "reject-app").expect("app");
+    client.join_session(app).await.expect("join").expect("media status");
+
+    let media = oxicast::MediaInfo::new("http://example.com/x.mp4", "video/mp4");
+    assert!(client.load_media(&media, true, 0.0, None).await.is_err(), "the device rejected it");
+
+    client.pause().await.expect("pause");
+    let pause = expect_msg(&mut seen, |m| m.payload["type"] == "PAUSE").await;
+    assert_eq!(
+        pause.payload["mediaSessionId"], 55,
+        "must keep the session from before the rejected load"
+    );
+
+    client.close().await.expect("close");
+}

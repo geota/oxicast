@@ -16,7 +16,9 @@ pub const NS_MEDIA: &str = "urn:x-cast:com.google.cast.media";
 pub const NS_RECEIVER: &str = "urn:x-cast:com.google.cast.receiver";
 pub const NS_CONNECTION: &str = "urn:x-cast:com.google.cast.tp.connection";
 pub const NS_HEARTBEAT: &str = "urn:x-cast:com.google.cast.tp.heartbeat";
-/// Test-only namespace: the mock resets the connection on `DROP_CONNECTION`.
+/// Test-only namespace: the mock resets the connection on `DROP_CONNECTION`,
+/// and on `BROADCAST_MEDIA_STATUS` sends an unsolicited `MEDIA_STATUS` from
+/// app `from` for media session `mediaSessionId`, as when another sender loads media.
 pub const NS_TEST: &str = "urn:x-cast:oxicast.test";
 
 /// A message the client sent to the mock receiver.
@@ -73,7 +75,9 @@ pub fn app(transport: &str, session: &str) -> Value {
 }
 
 /// Starts a mock receiver that runs three apps (`app-1` with media session 11,
-/// `app-2` with media session 22, `silent-app` never answers media requests). Returns its port and a stream of every
+/// `app-2` with media session 22, `silent-app` never answers media requests,
+/// `reject-app` with media session 55 answers LOAD with an IDLE status for
+/// session 56 and no media, as a device that rejects the media). Returns its port and a stream of every
 /// non-heartbeat message the client sends.
 pub async fn start_mock_receiver() -> (u16, mpsc::UnboundedReceiver<Received>) {
     start_mock_receiver_on("127.0.0.1:0").await.expect("bind")
@@ -119,6 +123,22 @@ pub async fn start_mock_receiver_on(
             if msg.namespace == NS_TEST && msg.payload["type"] == "DROP_CONNECTION" {
                 return; // drops `tls` -> RST
             }
+            if msg.namespace == NS_TEST && msg.payload["type"] == "BROADCAST_MEDIA_STATUS" {
+                let from = msg.payload["from"].as_str().unwrap_or("app-1");
+                let status = json!({
+                    "type": "MEDIA_STATUS",
+                    "requestId": 0,
+                    "status": [{
+                        "mediaSessionId": msg.payload["mediaSessionId"],
+                        "playerState": "PLAYING",
+                        "currentTime": 0.0,
+                    }],
+                });
+                if tls.write_all(&encode(NS_MEDIA, from, "*", &status)).await.is_err() {
+                    return;
+                }
+                continue;
+            }
             // `drop-app` behaves like a device that vanishes when told to stop.
             if msg.destination == "drop-app" && msg.payload["type"] == "STOP" {
                 let _ = seen_tx.send(msg.clone());
@@ -137,7 +157,7 @@ pub async fn start_mock_receiver_on(
                         "requestId": request_id,
                         "status": {
                             "volume": {"level": 0.5, "muted": false},
-                            "applications": [app("app-1", "session-1"), app("app-2", "session-2"), app("silent-app", "session-3"), app("drop-app", "session-4")],
+                            "applications": [app("app-1", "session-1"), app("app-2", "session-2"), app("silent-app", "session-3"), app("drop-app", "session-4"), app("reject-app", "session-5")],
                         }
                     }),
                 )),
@@ -146,6 +166,23 @@ pub async fn start_mock_receiver_on(
                         "app-1" => ("app-1", 11),
                         "app-2" => ("app-2", 22),
                         "drop-app" => ("drop-app", 44),
+                        "reject-app" if msg.payload["type"] == "LOAD" => {
+                            let rejected = json!({
+                                "type": "MEDIA_STATUS",
+                                "requestId": request_id,
+                                "status": [{"mediaSessionId": 56, "playerState": "IDLE", "currentTime": 0.0}],
+                            });
+                            let _ = seen_tx.send(msg.clone());
+                            if tls
+                                .write_all(&encode(NS_MEDIA, "reject-app", "sender-0", &rejected))
+                                .await
+                                .is_err()
+                            {
+                                return;
+                            }
+                            continue;
+                        }
+                        "reject-app" => ("reject-app", 55),
                         _ => continue,
                     };
                     let state = if msg.payload["type"] == "PAUSE" { "PAUSED" } else { "PLAYING" };

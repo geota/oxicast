@@ -212,6 +212,9 @@ impl CastClient {
         let (event_tx, event_rx) = mpsc::channel::<CastEvent>(config.event_buffer_size);
         let request_tracker = Arc::new(RequestTracker::new(config.request_timeout));
         let (state_holder, watchers) = state::new_state();
+        state_holder
+            .adopt_broadcast_media_sessions
+            .store(config.adopt_broadcast_media_sessions, Ordering::Relaxed);
         let alive = Arc::new(AtomicBool::new(true));
         let shutting_down = Arc::new(AtomicBool::new(false));
         let parent_cancel = CancellationToken::new();
@@ -577,11 +580,17 @@ impl CastClient {
         if !application.namespaces.iter().any(|ns| ns == channel::ns::NS_MEDIA) {
             return Ok(None);
         }
-        // The router records the media session id from the MEDIA_STATUS reply.
+        // The router records the media session id from the MEDIA_STATUS reply,
+        // unless broadcasts aren't adopted, so record it here too.
         // The join itself has succeeded at this point, so a failed status fetch
         // is not an error: controls start working on the next status broadcast.
         match self.media_status().await {
-            Ok(status) => Ok(status),
+            Ok(status) => {
+                if let Some(msid) = status.as_ref().map(|s| s.media_session_id).filter(|&m| m > 0) {
+                    self.inner.state.set_media_session_id(msid);
+                }
+                Ok(status)
+            }
             Err(e) => {
                 tracing::warn!(
                     "joined {} but fetching media status failed: {e}",
@@ -714,18 +723,6 @@ impl CastClient {
 
         Self::check_device_error(&json)?;
 
-        // Extract media session ID from response
-        if let Some(entries) = json.get("status").and_then(|s| s.as_array()) {
-            if let Some(entry) = entries.first() {
-                if let Some(msid) = entry.get("mediaSessionId").and_then(|m| m.as_i64()) {
-                    self.inner
-                        .state
-                        .media_session_id
-                        .store(msid as i32, std::sync::atomic::Ordering::Relaxed);
-                }
-            }
-        }
-
         let status = router::parse_media_status_from_json(&json).ok_or_else(|| {
             Error::LoadFailed { reason: "no media status in response".into(), detailed_error: None }
         })?;
@@ -739,6 +736,9 @@ impl CastClient {
                 detailed_error: None,
             });
         }
+
+        // Only an accepted load's media session becomes the one commands target.
+        self.inner.state.set_media_session_id(status.media_session_id);
 
         Ok(status)
     }
@@ -824,16 +824,6 @@ impl CastClient {
         .await?;
         let json = self.inner.request_tracker.wait_for(id, rx).await?;
         Self::check_device_error(&json)?;
-        if let Some(entries) = json.get("status").and_then(|s| s.as_array()) {
-            if let Some(entry) = entries.first() {
-                if let Some(msid) = entry.get("mediaSessionId").and_then(|m| m.as_i64()) {
-                    self.inner
-                        .state
-                        .media_session_id
-                        .store(msid as i32, std::sync::atomic::Ordering::Relaxed);
-                }
-            }
-        }
         let status =
             router::parse_media_status_from_json(&json).ok_or_else(|| Error::LoadFailed {
                 reason: "no media status in queue load response".into(),
@@ -846,6 +836,9 @@ impl CastClient {
                 detailed_error: None,
             });
         }
+
+        // Only an accepted load's media session becomes the one commands target.
+        self.inner.state.set_media_session_id(status.media_session_id);
 
         Ok(status)
     }

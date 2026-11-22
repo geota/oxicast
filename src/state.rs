@@ -6,7 +6,7 @@
 
 use crate::types::{MediaStatus, ReceiverStatus};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use tokio::sync::watch;
 
 /// Connection lifecycle state.
@@ -31,6 +31,8 @@ pub(crate) struct StateHolder {
     /// Tracks the current media session ID from broadcasts.
     /// Shared with CastClient via Arc.
     pub media_session_id: Arc<AtomicI32>,
+    /// Whether `MEDIA_STATUS` broadcasts update `media_session_id`.
+    pub adopt_broadcast_media_sessions: AtomicBool,
 }
 
 /// Read-only handles for consumers to watch state changes.
@@ -57,6 +59,7 @@ pub(crate) fn new_state() -> (Arc<StateHolder>, StateWatchers) {
             receiver_tx,
             connection_tx,
             media_session_id: Arc::new(AtomicI32::new(0)),
+            adopt_broadcast_media_sessions: AtomicBool::new(true),
         }),
         StateWatchers { media: media_rx, receiver: receiver_rx, connection: connection_rx },
     )

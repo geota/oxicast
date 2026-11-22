@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - `CastClient::local_addr()` and `CastClient::peer_addr()`: the socket addresses of the connection to the device, updated on reconnect. On a host with several interfaces, `local_addr()` is the address the device reached this host on, which is the one to use in URLs for media served from this host.
+- `CastClientBuilder::adopt_broadcast_media_sessions` (default `true`, unchanged behaviour). With `false`, media commands keep targeting the media session this client loaded or joined instead of switching to any session announced in a `MEDIA_STATUS` broadcast, so a client never ends up controlling media another sender loaded on the same app.
+
+### Fixed
+- A load the device rejects (an `IDLE` reply with no media) no longer replaces the media session that commands target.
 
 ## [0.0.5] - 2026-11-11
 

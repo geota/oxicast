@@ -18,6 +18,7 @@ pub struct CastClientBuilder {
     pub(crate) reconnect_delay: Duration,
     pub(crate) event_buffer_size: usize,
     pub(crate) verify_tls: bool,
+    pub(crate) adopt_broadcast_media_sessions: bool,
 }
 
 impl CastClientBuilder {
@@ -35,6 +36,7 @@ impl CastClientBuilder {
             reconnect_delay: Duration::from_secs(2),
             event_buffer_size: 64,
             verify_tls: false,
+            adopt_broadcast_media_sessions: true,
         }
     }
 
@@ -96,6 +98,25 @@ impl CastClientBuilder {
     /// Default: `false` (Cast devices use self-signed certificates).
     pub fn verify_tls(mut self, verify: bool) -> Self {
         self.verify_tls = verify;
+        self
+    }
+
+    /// Whether playback commands follow media sessions announced in status broadcasts.
+    ///
+    /// Default: `true`. Every `MEDIA_STATUS` updates the media session that
+    /// `play()`, `pause()`, `seek()` and the other media commands target, even
+    /// one started by another sender.
+    ///
+    /// With `false`, commands only target a media session this client started
+    /// with an accepted [`load_media`](CastClient::load_media) or
+    /// [`queue_load`](CastClient::queue_load), or found with
+    /// [`join_session`](CastClient::join_session). If another sender then loads
+    /// different media, commands keep the old session id and the device rejects
+    /// them, instead of controlling the other sender's media. A `join_session`
+    /// whose status fetch fails leaves commands without a session. Status
+    /// updates and events are reported either way.
+    pub fn adopt_broadcast_media_sessions(mut self, adopt: bool) -> Self {
+        self.adopt_broadcast_media_sessions = adopt;
         self
     }
 
