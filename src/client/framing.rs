@@ -75,6 +75,16 @@ pub async fn write_message<W: tokio::io::AsyncWrite + Unpin>(
     Ok(())
 }
 
+/// Check that a message fits the protocol's 64 KiB limit once encoded, so an oversized
+/// message is refused before it is queued rather than failing in the writer.
+pub fn check_size(msg: &CastMessage) -> Result<()> {
+    let len = msg.encoded_len();
+    if len > 65_536 {
+        return Err(Error::Framing(format!("outbound message too large: {len} bytes (max 65536)")));
+    }
+    Ok(())
+}
+
 /// Build a CastMessage with a JSON string payload.
 pub fn build_message(
     namespace: &str,
@@ -158,6 +168,13 @@ mod tests {
         assert_eq!(decoded.payload_type, crate::proto::cast_message::PayloadType::Binary as i32);
         assert_eq!(decoded.payload_binary.as_deref(), Some(&[0, 1, 2, 0xFF][..]));
         assert_eq!(decoded.payload_utf8, None);
+    }
+
+    #[test]
+    fn test_check_size() {
+        assert!(check_size(&build_binary_message("ns", "s", "d", vec![0; 1000])).is_ok());
+        let big = build_binary_message("ns", "s", "d", vec![0; 70_000]);
+        assert!(matches!(check_size(&big), Err(Error::Framing(ref s)) if s.contains("too large")));
     }
 
     #[tokio::test]

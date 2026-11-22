@@ -8,8 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- Binary payloads: `CastClient::send_raw_binary()` sends a message with a binary payload, and every binary message received, on any namespace, arrives as the new `CastEvent::RawBinaryMessage { namespace, source, destination, payload }`. Binary payloads carry no `requestId`, so they are not correlated with requests.
-- `CastClientBuilder::first_message(namespace, destination, payload)`: a binary message sent before any other message on every connection, including reconnections, with `payload` called once per connection. This is how Cast senders send a device-authentication challenge (`urn:x-cast:com.google.cast.tp.deviceauth`), which must come first after the TLS handshake.
+- Binary payloads: `CastClient::send_raw_binary()` sends a message with a binary payload (one over the 64 KiB message limit is refused before it is queued), and every binary message received, on any namespace, arrives as the new `CastEvent::RawBinaryMessage { connection, namespace, source, destination, payload }`. Binary payloads carry no `requestId`, so they are not correlated with requests; `connection` is the number of the connection the message arrived on, so a reply queued before a reconnect can be told apart.
+- `CastClient::connection_number()`: 0 for the first connection, one more on each reconnect.
+- `CastClientBuilder::first_message(namespace, destination, payload)`: a binary message sent before any other message on every connection, including reconnections, with `payload` called once per connection with the connection's number. This is how Cast senders send a device-authentication challenge (`urn:x-cast:com.google.cast.tp.deviceauth`), which must come first after the TLS handshake.
 
 ## [0.0.5] - 2026-11-11
 

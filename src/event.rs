@@ -94,8 +94,14 @@ pub enum CastEvent {
     /// Binary payloads carry no `requestId`, so they are never correlated with a
     /// request; replies to [`send_raw_binary()`](crate::CastClient::send_raw_binary)
     /// and to the builder's `first_message` (see
-    /// [`CastClient::builder()`](crate::CastClient::builder)) arrive here.
+    /// [`CastClient::builder()`](crate::CastClient::builder)) arrive here. Events
+    /// queued before a reconnect are still delivered after it, so `connection`
+    /// tells a reply on an earlier connection from one on the current connection.
+    /// Like every event, it is dropped if the event buffer is full.
     RawBinaryMessage {
+        /// The number of the connection it arrived on (see
+        /// [`CastClient::connection_number()`](crate::CastClient::connection_number)).
+        connection: u64,
         /// The Cast namespace of the message.
         namespace: String,
         /// The sender ID.

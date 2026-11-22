@@ -250,7 +250,8 @@ pub async fn connect(port: u16) -> oxicast::CastClient {
 /// A mock receiver that accepts one connection after another, so a client can
 /// reconnect. Returns its port and every non-heartbeat message the client sends,
 /// with the number of the connection it came on (from 0). It answers PING, resets
-/// the connection on `DROP_CONNECTION` and ignores everything else.
+/// the connection on `DROP_CONNECTION`, echoes binary messages back reversed and
+/// ignores everything else.
 pub async fn start_reconnectable_receiver() -> (u16, mpsc::UnboundedReceiver<(usize, Received)>) {
     let certs = vec![
         CertificateDer::from_pem_slice(include_bytes!("../fixtures/mock_device.crt"))
@@ -297,9 +298,18 @@ pub async fn start_reconnectable_receiver() -> (u16, mpsc::UnboundedReceiver<(us
                     continue;
                 }
                 let drop_now = msg.namespace == NS_TEST && msg.payload["type"] == "DROP_CONNECTION";
+                let echo = msg.binary.as_ref().map(|b| {
+                    let reply: Vec<u8> = b.iter().rev().copied().collect();
+                    encode_binary(&msg.namespace, "receiver-0", "sender-0", &reply)
+                });
                 let _ = seen_tx.send((connection, msg));
                 if drop_now {
                     break; // drops `tls` -> RST
+                }
+                if let Some(echo) = echo {
+                    if tls.write_all(&echo).await.is_err() {
+                        break;
+                    }
                 }
             }
         }

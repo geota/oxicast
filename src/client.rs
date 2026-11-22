@@ -128,6 +128,8 @@ pub(crate) struct ClientConfig {
 }
 
 struct ClientInner {
+    /// Number of the current connection: 0, then one more on each reconnect.
+    connection: std::sync::atomic::AtomicU64,
     /// Swappable write channel — replaced on reconnect.
     write_tx: tokio::sync::RwLock<mpsc::Sender<crate::proto::CastMessage>>,
     request_tracker: Arc<RequestTracker>,
@@ -192,7 +194,7 @@ impl CastClient {
         let (write_tx, write_rx) = mpsc::channel::<crate::proto::CastMessage>(64);
         // Queued before any task starts, so nothing can be sent ahead of it.
         if let Some(first) = &config.first_message {
-            write_tx.try_send(first.build()).map_err(|_| Error::Disconnected)?;
+            write_tx.try_send(first.build(0)?).map_err(|_| Error::Disconnected)?;
         }
         let (event_tx, event_rx) = mpsc::channel::<CastEvent>(config.event_buffer_size);
         let request_tracker = Arc::new(RequestTracker::new(config.request_timeout));
@@ -221,6 +223,7 @@ impl CastClient {
         handles.reader = Some(tokio::spawn(reader_loop(
             read_half,
             ReaderContext {
+                connection: 0,
                 request_tracker: request_tracker.clone(),
                 event_tx: event_tx.clone(),
                 state: state_holder.clone(),
@@ -267,6 +270,7 @@ impl CastClient {
 
         let client = Self {
             inner: Arc::new(ClientInner {
+                connection: std::sync::atomic::AtomicU64::new(0),
                 write_tx: tokio::sync::RwLock::new(write_tx),
                 request_tracker,
                 event_tx: tokio::sync::RwLock::new(event_tx),
@@ -441,10 +445,12 @@ impl CastClient {
         // Event channels are NOT replaced — the same event_tx/event_rx pair stays alive
         // across reconnects so next_event() never sees a spurious None.
         let (new_write_tx, new_write_rx) = mpsc::channel::<crate::proto::CastMessage>(64);
+        let connection = self.inner.connection.load(Ordering::Acquire) + 1;
         // Queued before any task starts, so nothing can be sent ahead of it.
         if let Some(first) = &config.first_message {
-            new_write_tx.try_send(first.build()).map_err(|_| Error::Disconnected)?;
+            new_write_tx.try_send(first.build(connection)?).map_err(|_| Error::Disconnected)?;
         }
+        self.inner.connection.store(connection, Ordering::Release);
         let cancel = self.inner.parent_cancel.child_token();
 
         *self.inner.write_tx.write().await = new_write_tx.clone();
@@ -472,6 +478,7 @@ impl CastClient {
         handles.reader = Some(tokio::spawn(reader_loop(
             read_half,
             ReaderContext {
+                connection,
                 request_tracker: self.inner.request_tracker.clone(),
                 event_tx: event_tx.clone(),
                 state: self.inner.state.clone(),
@@ -914,10 +921,18 @@ impl CastClient {
         self.send(msg).await
     }
 
+    /// The number of the current connection: 0 for the first, one more on each
+    /// reconnect. [`CastEvent::RawBinaryMessage`] carries the number of the
+    /// connection it arrived on.
+    pub fn connection_number(&self) -> u64 {
+        self.inner.connection.load(Ordering::Acquire)
+    }
+
     /// Send a message with a binary payload, without waiting for a response.
     ///
     /// Binary payloads carry no `requestId`, so there is nothing to correlate a
-    /// reply with: replies arrive as [`CastEvent::RawBinaryMessage`]. To send a
+    /// reply with: replies arrive as [`CastEvent::RawBinaryMessage`]. A payload
+    /// over the 64 KiB message limit is refused before it is queued. To send a
     /// binary message before anything else on a connection, such as a
     /// device-authentication challenge, use the builder's `first_message`
     /// (see [`builder()`](Self::builder)).
@@ -928,6 +943,7 @@ impl CastClient {
         payload: Vec<u8>,
     ) -> Result<()> {
         let msg = framing::build_binary_message(namespace, "sender-0", destination, payload);
+        framing::check_size(&msg)?;
         self.send(msg).await
     }
 
@@ -1086,6 +1102,8 @@ async fn writer_loop(
 
 /// Context passed to the reader task.
 struct ReaderContext {
+    /// Number of the connection this reader serves.
+    connection: u64,
     request_tracker: Arc<RequestTracker>,
     event_tx: mpsc::Sender<CastEvent>,
     state: Arc<state::StateHolder>,
@@ -1117,7 +1135,7 @@ async fn reader_loop(mut reader: ReadHalf<TlsStream<TcpStream>>, ctx: ReaderCont
                             bytes = summary.len,
                             "← recv"
                         );
-                        router::route(&msg, &ctx.request_tracker, &ctx.event_tx, &ctx.state, &ctx.write_tx).await;
+                        router::route(&msg, ctx.connection, &ctx.request_tracker, &ctx.event_tx, &ctx.state, &ctx.write_tx).await;
                     }
                     Err(Error::Disconnected) => {
                         tracing::info!("connection closed by device");

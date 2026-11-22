@@ -31,18 +31,20 @@ pub struct CastClientBuilder {
 pub(crate) struct FirstMessage {
     namespace: String,
     destination: String,
-    payload: Arc<dyn Fn() -> Vec<u8> + Send + Sync>,
+    payload: Arc<dyn Fn(u64) -> Vec<u8> + Send + Sync>,
 }
 
 impl FirstMessage {
-    /// Build the message for a new connection, with a fresh payload.
-    pub(crate) fn build(&self) -> CastMessage {
-        framing::build_binary_message(
+    /// Build the message for connection number `connection`, with a fresh payload.
+    pub(crate) fn build(&self, connection: u64) -> Result<CastMessage> {
+        let msg = framing::build_binary_message(
             &self.namespace,
             ns::SENDER_ID,
             &self.destination,
-            (self.payload)(),
-        )
+            (self.payload)(connection),
+        );
+        framing::check_size(&msg)?;
+        Ok(msg)
     }
 }
 
@@ -130,16 +132,21 @@ impl CastClientBuilder {
     /// connection, including reconnections.
     ///
     /// `payload` is called once per connection, right after the TLS handshake,
+    /// with the connection's number (see
+    /// [`CastClient::connection_number()`](crate::CastClient::connection_number)),
     /// so each connection can carry fresh content such as a nonce. The message
     /// is sent ahead of the `CONNECT` to `receiver-0`, heartbeats and any
     /// command. Cast senders send their device-authentication challenge this way:
     /// a `DeviceAuthMessage` on `urn:x-cast:com.google.cast.tp.deviceauth` to
-    /// `receiver-0`. Replies arrive as [`CastEvent::RawBinaryMessage`](crate::CastEvent::RawBinaryMessage).
+    /// `receiver-0`. Replies arrive as [`CastEvent::RawBinaryMessage`](crate::CastEvent::RawBinaryMessage),
+    /// tagged with the connection they came on; like every event, they are dropped
+    /// if the event buffer is full. A payload over the 64 KiB message limit fails
+    /// the connection attempt.
     ///
     /// ```no_run
     /// # async fn example() -> oxicast::Result<()> {
     /// let client = oxicast::CastClient::builder("192.168.1.100", 8009)
-    ///     .first_message("urn:x-cast:com.google.cast.tp.deviceauth", "receiver-0", || {
+    ///     .first_message("urn:x-cast:com.google.cast.tp.deviceauth", "receiver-0", |_connection| {
     ///         vec![/* an encoded DeviceAuthMessage with a fresh nonce */]
     ///     })
     ///     .connect()
@@ -151,7 +158,7 @@ impl CastClientBuilder {
         mut self,
         namespace: impl Into<String>,
         destination: impl Into<String>,
-        payload: impl Fn() -> Vec<u8> + Send + Sync + 'static,
+        payload: impl Fn(u64) -> Vec<u8> + Send + Sync + 'static,
     ) -> Self {
         self.first_message = Some(FirstMessage {
             namespace: namespace.into(),
