@@ -152,6 +152,13 @@ struct ClientInner {
     transport_id: tokio::sync::Mutex<Option<String>>,
     /// Current app session ID.
     session_id: tokio::sync::Mutex<Option<String>>,
+    /// DER of the device's TLS certificate on the current connection, updated on reconnect.
+    peer_certificate: std::sync::Mutex<Option<Vec<u8>>>,
+}
+
+/// DER of the leaf certificate the device presented in the TLS handshake.
+fn peer_certificate_of(stream: &TlsStream<TcpStream>) -> Option<Vec<u8>> {
+    stream.get_ref().1.peer_certificates()?.first().map(|cert| cert.to_vec())
 }
 
 impl Drop for ClientInner {
@@ -185,6 +192,7 @@ impl CastClient {
             config.connect_timeout,
         )
         .await?;
+        let peer_certificate = peer_certificate_of(&tls_stream);
         let (read_half, write_half) = io::split(tls_stream);
 
         // Create channels and shared state
@@ -276,6 +284,7 @@ impl CastClient {
                 last_activity,
                 transport_id: tokio::sync::Mutex::new(None),
                 session_id: tokio::sync::Mutex::new(None),
+                peer_certificate: std::sync::Mutex::new(peer_certificate),
             }),
         };
 
@@ -316,6 +325,18 @@ impl CastClient {
     /// Check if the connection is alive.
     pub fn is_connected(&self) -> bool {
         self.inner.alive.load(Ordering::Acquire)
+    }
+
+    /// The DER-encoded certificate the device presented in the TLS handshake of
+    /// the current connection.
+    ///
+    /// Cast devices present self-signed certificates, so this proves nothing on its
+    /// own. It is what Cast device authentication binds to: the device signs the
+    /// sender's nonce followed by this certificate. It is updated when the client
+    /// reconnects; after the connection closes it is the last connection's
+    /// certificate. `None` if the device presented none.
+    pub fn peer_certificate(&self) -> Option<Vec<u8>> {
+        self.inner.peer_certificate.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// Disconnect from the device.
@@ -422,6 +443,7 @@ impl CastClient {
             config.connect_timeout,
         )
         .await?;
+        let peer_certificate = peer_certificate_of(&tls_stream);
         let (read_half, write_half) = io::split(tls_stream);
 
         // Re-check shutting_down after the TLS handshake. If disconnect() was
@@ -438,6 +460,7 @@ impl CastClient {
         let cancel = self.inner.parent_cancel.child_token();
 
         *self.inner.write_tx.write().await = new_write_tx.clone();
+        *self.inner.peer_certificate.lock().unwrap_or_else(|e| e.into_inner()) = peer_certificate;
         let event_tx = self.inner.event_tx.read().await.clone();
         self.inner.alive.store(true, Ordering::Release);
         self.inner.shutting_down.store(false, Ordering::Release);

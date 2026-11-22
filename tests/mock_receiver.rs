@@ -236,3 +236,23 @@ async fn disconnect_reports_a_single_event_when_the_device_vanishes_meanwhile() 
     }
     assert_eq!(disconnects, vec![None], "only the terminal Disconnected(None) of disconnect()");
 }
+
+#[tokio::test]
+async fn reports_the_device_tls_certificate() {
+    use rustls::pki_types::CertificateDer;
+    use rustls::pki_types::pem::PemObject;
+
+    let (port, _seen) = start_mock_receiver().await;
+    let client = connect(port).await;
+
+    let expected = CertificateDer::from_pem_slice(include_bytes!("fixtures/mock_device.crt"))
+        .expect("fixture certificate");
+    assert_eq!(client.peer_certificate().as_deref(), Some(expected.as_ref()));
+
+    client.disconnect().await.expect("disconnect");
+    assert_eq!(
+        client.peer_certificate().as_deref(),
+        Some(expected.as_ref()),
+        "keeps the last connection's certificate after close"
+    );
+}

@@ -35,6 +35,7 @@ let client = CastClient::builder("192.168.1.100", 8009)
 | `builder(host, port)` | `CastClientBuilder` | Start building with custom config |
 | `is_connected()` | `bool` | Check if the connection is alive |
 | `connection_state()` | `ConnectionState` | `Connected`, `Disconnected`, or `Reconnecting { attempt }` |
+| `peer_certificate()` | `Option<Vec<u8>>` | DER of the device's TLS certificate on the connection (self-signed; what device authentication binds to) |
 | `disconnect()` | `Result<()>` | Stops media, then graceful shutdown; closes event channel |
 | `stop_and_close()` | `Result<()>` | Same as `disconnect()`, explicit name |
 | `close()` | `Result<()>` | Graceful shutdown without stopping media (leave a joined session playing) |
