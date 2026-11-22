@@ -348,11 +348,13 @@ async fn binary_messages_round_trip_as_raw_binary_events() {
         loop {
             match client.next_event().await.expect("event stream open") {
                 oxicast::CastEvent::RawBinaryMessage {
+                    connection,
                     namespace,
                     source,
                     destination,
                     payload,
                 } => {
+                    assert_eq!(connection, 0);
                     return (namespace, source, destination, payload);
                 }
                 _ => continue,
@@ -382,7 +384,7 @@ async fn first_message_goes_out_before_anything_else_on_every_connection() {
     let client = oxicast::CastClient::builder("127.0.0.1", port)
         .auto_reconnect(false)
         .request_timeout(Duration::from_secs(5))
-        .first_message(NS_TEST, "receiver-0", move || {
+        .first_message(NS_TEST, "receiver-0", move |_connection| {
             vec![counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed)]
         })
         .connect()
@@ -443,4 +445,101 @@ async fn reports_the_device_tls_certificate() {
         Some(expected.as_ref()),
         "keeps the last connection's certificate after close"
     );
+}
+
+#[tokio::test]
+async fn the_device_certificate_follows_a_reconnect() {
+    use rustls::pki_types::CertificateDer;
+    use rustls::pki_types::pem::PemObject;
+    let der = |pem: &[u8]| CertificateDer::from_pem_slice(pem).expect("fixture").to_vec();
+    let first = der(include_bytes!("fixtures/mock_device.crt"));
+    let second = der(include_bytes!("fixtures/mock_device_2.crt"));
+
+    let port = start_receiver_changing_certificate().await;
+    let client = oxicast::CastClient::builder("127.0.0.1", port)
+        .auto_reconnect(false)
+        .connect()
+        .await
+        .expect("connect");
+    assert_eq!(client.peer_certificate(), Some(first));
+
+    client
+        .send_raw_no_reply(NS_TEST, "receiver-0", json!({"type": "DROP_CONNECTION"}))
+        .await
+        .expect("send drop trigger");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while client.is_connected() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("connection dropped");
+    client.reconnect().await.expect("reconnect");
+    assert_eq!(client.peer_certificate(), Some(second), "the new connection's certificate");
+    client.close().await.expect("close");
+}
+
+#[tokio::test]
+async fn oversized_binary_payloads_are_refused_before_they_are_queued() {
+    let (port, _seen) = start_mock_receiver().await;
+    let client = connect(port).await;
+    let result = client.send_raw_binary(NS_TEST, "receiver-0", vec![0; 70_000]).await;
+    assert!(matches!(result, Err(oxicast::Error::Framing(_))), "{result:?}");
+    assert!(client.is_connected(), "the connection survives");
+    client.receiver_status().await.expect("still usable");
+    client.disconnect().await.expect("disconnect");
+}
+
+#[tokio::test]
+async fn binary_replies_queued_before_a_reconnect_keep_their_connection_number() {
+    let (port, mut seen) = start_reconnectable_receiver().await;
+    let client = oxicast::CastClient::builder("127.0.0.1", port)
+        .auto_reconnect(false)
+        .request_timeout(Duration::from_secs(5))
+        .first_message(NS_TEST, "receiver-0", |connection| vec![connection as u8, 0xAA])
+        .connect()
+        .await
+        .expect("connect");
+    assert_eq!(client.connection_number(), 0);
+    let _ = next(&mut seen).await; // the first message, echoed on connection 0
+
+    // Nobody reads events while the connection drops and comes back.
+    client
+        .send_raw_no_reply(NS_TEST, "receiver-0", json!({"type": "DROP_CONNECTION"}))
+        .await
+        .expect("send drop trigger");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while client.is_connected() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("connection dropped");
+    client.reconnect().await.expect("reconnect");
+    assert_eq!(client.connection_number(), 1);
+
+    let mut replies = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while replies.len() < 2 {
+            if let Some(oxicast::CastEvent::RawBinaryMessage { connection, payload, .. }) =
+                client.next_event().await
+            {
+                replies.push((connection, payload));
+            }
+        }
+    })
+    .await
+    .expect("both replies");
+    assert_eq!(replies, vec![(0, vec![0xAA, 0]), (1, vec![0xAA, 1])]);
+    client.close().await.expect("close");
+}
+
+#[tokio::test]
+async fn an_oversized_first_message_fails_the_connection_attempt() {
+    let (port, _seen) = start_reconnectable_receiver().await;
+    let result = oxicast::CastClient::builder("127.0.0.1", port)
+        .first_message(NS_TEST, "receiver-0", |_| vec![0; 70_000])
+        .connect()
+        .await;
+    assert!(matches!(result, Err(oxicast::Error::Framing(_))));
 }

@@ -287,7 +287,8 @@ pub async fn connect(port: u16) -> oxicast::CastClient {
 /// A mock receiver that accepts one connection after another, so a client can
 /// reconnect. Returns its port and every non-heartbeat message the client sends,
 /// with the number of the connection it came on (from 0). It answers PING, resets
-/// the connection on `DROP_CONNECTION` and ignores everything else.
+/// the connection on `DROP_CONNECTION`, echoes binary messages back reversed and
+/// ignores everything else.
 pub async fn start_reconnectable_receiver() -> (u16, mpsc::UnboundedReceiver<(usize, Received)>) {
     let certs = vec![
         CertificateDer::from_pem_slice(include_bytes!("../fixtures/mock_device.crt"))
@@ -334,13 +335,77 @@ pub async fn start_reconnectable_receiver() -> (u16, mpsc::UnboundedReceiver<(us
                     continue;
                 }
                 let drop_now = msg.namespace == NS_TEST && msg.payload["type"] == "DROP_CONNECTION";
+                let echo = msg.binary.as_ref().map(|b| {
+                    let reply: Vec<u8> = b.iter().rev().copied().collect();
+                    encode_binary(&msg.namespace, "receiver-0", "sender-0", &reply)
+                });
                 let _ = seen_tx.send((connection, msg));
                 if drop_now {
                     break; // drops `tls` -> RST
+                }
+                if let Some(echo) = echo {
+                    if tls.write_all(&echo).await.is_err() {
+                        break;
+                    }
                 }
             }
         }
     });
 
     (port, seen_rx)
+}
+
+/// A mock receiver that accepts connections one after another, presenting the
+/// first fixture certificate on the first connection and the second on every
+/// later one. It answers PING and resets the connection on `DROP_CONNECTION`.
+pub async fn start_receiver_changing_certificate() -> u16 {
+    let config = |crt: &[u8], key: &[u8]| {
+        let certs = vec![CertificateDer::from_pem_slice(crt).expect("cert")];
+        let key = PrivateKeyDer::from_pem_slice(key).expect("key");
+        let config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(certs, key)
+            .expect("server config");
+        tokio_rustls::TlsAcceptor::from(Arc::new(config))
+    };
+    let first = config(
+        include_bytes!("../fixtures/mock_device.crt"),
+        include_bytes!("../fixtures/mock_device.key"),
+    );
+    let later = config(
+        include_bytes!("../fixtures/mock_device_2.crt"),
+        include_bytes!("../fixtures/mock_device_2.key"),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    tokio::spawn(async move {
+        for connection in 0.. {
+            let Ok((tcp, _)) = listener.accept().await else { return };
+            tcp.set_zero_linger().expect("linger");
+            let acceptor = if connection == 0 { &first } else { &later };
+            let Ok(mut tls) = acceptor.accept(tcp).await else { continue };
+            loop {
+                let mut len = [0u8; 4];
+                if tls.read_exact(&mut len).await.is_err() {
+                    break;
+                }
+                let mut buf = vec![0u8; u32::from_be_bytes(len) as usize];
+                if tls.read_exact(&mut buf).await.is_err() {
+                    break;
+                }
+                let msg = decode(&buf);
+                if msg.namespace == NS_TEST && msg.payload["type"] == "DROP_CONNECTION" {
+                    break; // drops `tls` -> RST
+                }
+                if msg.namespace == NS_HEARTBEAT && msg.payload["type"] == "PING" {
+                    let pong =
+                        encode(NS_HEARTBEAT, "receiver-0", "sender-0", &json!({"type": "PONG"}));
+                    if tls.write_all(&pong).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+    port
 }

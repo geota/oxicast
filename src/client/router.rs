@@ -33,6 +33,7 @@ use crate::types::*;
 /// Route an inbound message to the appropriate handler.
 pub(crate) async fn route(
     msg: &CastMessage,
+    connection: u64,
     request_tracker: &RequestTracker,
     event_tx: &mpsc::Sender<CastEvent>,
     state: &StateHolder,
@@ -41,6 +42,7 @@ pub(crate) async fn route(
     let namespace = &msg.namespace;
     if msg.payload_type == PayloadType::Binary as i32 {
         let _ = event_tx.try_send(CastEvent::RawBinaryMessage {
+            connection,
             namespace: namespace.clone(),
             source: msg.source_id.clone(),
             destination: msg.destination_id.clone(),
@@ -444,7 +446,7 @@ mod tests {
     async fn test_ping_auto_reply() {
         let (tracker, event_tx, _event_rx, state, write_tx, mut write_rx) = setup().await;
         let msg = build_message(ns::NS_HEARTBEAT, "receiver-0", "sender-0", r#"{"type":"PING"}"#);
-        route(&msg, &tracker, &event_tx, &state, &write_tx).await;
+        route(&msg, 0, &tracker, &event_tx, &state, &write_tx).await;
 
         // Should send PONG
         let reply = write_rx.try_recv().unwrap();
@@ -458,7 +460,7 @@ mod tests {
     async fn test_pong_does_not_reply() {
         let (tracker, event_tx, _event_rx, state, write_tx, mut write_rx) = setup().await;
         let msg = build_message(ns::NS_HEARTBEAT, "receiver-0", "sender-0", r#"{"type":"PONG"}"#);
-        route(&msg, &tracker, &event_tx, &state, &write_tx).await;
+        route(&msg, 0, &tracker, &event_tx, &state, &write_tx).await;
 
         // Should NOT send anything
         assert!(write_rx.try_recv().is_err());
@@ -468,7 +470,7 @@ mod tests {
     async fn test_close_emits_raw_message() {
         let (tracker, event_tx, mut event_rx, state, write_tx, _write_rx) = setup().await;
         let msg = build_message(ns::NS_CONNECTION, "web-123", "sender-0", r#"{"type":"CLOSE"}"#);
-        route(&msg, &tracker, &event_tx, &state, &write_tx).await;
+        route(&msg, 0, &tracker, &event_tx, &state, &write_tx).await;
 
         let event = event_rx.try_recv().unwrap();
         match event {
@@ -484,7 +486,7 @@ mod tests {
     async fn test_close_does_not_emit_disconnected() {
         let (tracker, event_tx, mut event_rx, state, write_tx, _write_rx) = setup().await;
         let msg = build_message(ns::NS_CONNECTION, "web-123", "sender-0", r#"{"type":"CLOSE"}"#);
-        route(&msg, &tracker, &event_tx, &state, &write_tx).await;
+        route(&msg, 0, &tracker, &event_tx, &state, &write_tx).await;
 
         let event = event_rx.try_recv().unwrap();
         assert!(!event.is_disconnected());
@@ -504,7 +506,7 @@ mod tests {
             }
         });
         let msg = build_message(ns::NS_RECEIVER, "receiver-0", "sender-0", &payload.to_string());
-        route(&msg, &tracker, &event_tx, &state, &write_tx).await;
+        route(&msg, 0, &tracker, &event_tx, &state, &write_tx).await;
 
         let value = rx.await.unwrap();
         assert_eq!(value["requestId"], id);
@@ -523,7 +525,7 @@ mod tests {
             }
         });
         let msg = build_message(ns::NS_RECEIVER, "receiver-0", "sender-0", &payload.to_string());
-        route(&msg, &tracker, &event_tx, &state, &write_tx).await;
+        route(&msg, 0, &tracker, &event_tx, &state, &write_tx).await;
 
         let event = event_rx.try_recv().unwrap();
         match event {
@@ -551,7 +553,7 @@ mod tests {
             }]
         });
         let msg = build_message(ns::NS_MEDIA, "web-5", "sender-0", &payload.to_string());
-        route(&msg, &tracker, &event_tx, &state, &write_tx).await;
+        route(&msg, 0, &tracker, &event_tx, &state, &write_tx).await;
 
         let value = rx.await.unwrap();
         assert_eq!(value["status"][0]["mediaSessionId"], 42);
@@ -572,7 +574,7 @@ mod tests {
             }]
         });
         let msg = build_message(ns::NS_MEDIA, "web-5", "sender-0", &payload.to_string());
-        route(&msg, &tracker, &event_tx, &state, &write_tx).await;
+        route(&msg, 0, &tracker, &event_tx, &state, &write_tx).await;
 
         assert_eq!(state.media_session_id.load(std::sync::atomic::Ordering::Relaxed), 77);
     }
@@ -593,7 +595,7 @@ mod tests {
             }]
         });
         let msg = build_message(ns::NS_MEDIA, "web-5", "sender-0", &payload.to_string());
-        route(&msg, &tracker, &event_tx, &state, &write_tx).await;
+        route(&msg, 0, &tracker, &event_tx, &state, &write_tx).await;
 
         // First event: MediaSessionEnded
         let event = event_rx.try_recv().unwrap();
@@ -626,7 +628,7 @@ mod tests {
             }]
         });
         let msg = build_message(ns::NS_MEDIA, "web-5", "sender-0", &payload.to_string());
-        route(&msg, &tracker, &event_tx, &state, &write_tx).await;
+        route(&msg, 0, &tracker, &event_tx, &state, &write_tx).await;
 
         // Should only get MediaStatusChanged, NOT MediaSessionEnded (session 0 is not real)
         let event = event_rx.try_recv().unwrap();
@@ -646,7 +648,7 @@ mod tests {
             "itemId": 1
         });
         let msg = build_message(ns::NS_MEDIA, "web-5", "sender-0", &payload.to_string());
-        route(&msg, &tracker, &event_tx, &state, &write_tx).await;
+        route(&msg, 0, &tracker, &event_tx, &state, &write_tx).await;
 
         let value = rx.await.unwrap();
         assert_eq!(value["type"], "LOAD_FAILED");
@@ -664,7 +666,7 @@ mod tests {
             "detailedErrorCode": 104
         });
         let msg = build_message(ns::NS_MEDIA, "web-5", "sender-0", &payload.to_string());
-        route(&msg, &tracker, &event_tx, &state, &write_tx).await;
+        route(&msg, 0, &tracker, &event_tx, &state, &write_tx).await;
 
         assert_eq!(
             event_rx.try_recv().unwrap(),
@@ -685,7 +687,7 @@ mod tests {
             "detailedErrorCode": 104
         });
         let msg = build_message(ns::NS_MEDIA, "web-5", "sender-0", &payload.to_string());
-        route(&msg, &tracker, &event_tx, &state, &write_tx).await;
+        route(&msg, 0, &tracker, &event_tx, &state, &write_tx).await;
 
         let value = rx.await.unwrap();
         assert_eq!(value, payload);
@@ -706,7 +708,7 @@ mod tests {
             "requestId": id,
         });
         let msg = build_message(ns::NS_MEDIA, "web-5", "sender-0", &payload.to_string());
-        route(&msg, &tracker, &event_tx, &state, &write_tx).await;
+        route(&msg, 0, &tracker, &event_tx, &state, &write_tx).await;
 
         let value = rx.await.unwrap();
         assert_eq!(value["type"], "LOAD_CANCELLED");
@@ -723,7 +725,7 @@ mod tests {
             "reason": "bad stuff"
         });
         let msg = build_message(ns::NS_MEDIA, "web-5", "sender-0", &payload.to_string());
-        route(&msg, &tracker, &event_tx, &state, &write_tx).await;
+        route(&msg, 0, &tracker, &event_tx, &state, &write_tx).await;
 
         let value = rx.await.unwrap();
         assert_eq!(value["type"], "INVALID_REQUEST");
@@ -738,7 +740,7 @@ mod tests {
             "requestId": 0,
         });
         let msg = build_message(ns::NS_MEDIA, "web-5", "sender-0", &payload.to_string());
-        route(&msg, &tracker, &event_tx, &state, &write_tx).await;
+        route(&msg, 0, &tracker, &event_tx, &state, &write_tx).await;
 
         // No events emitted for unknown media message types
         assert!(event_rx.try_recv().is_err());
@@ -759,7 +761,7 @@ mod tests {
             "sender-0",
             &payload.to_string(),
         );
-        route(&msg, &tracker, &event_tx, &state, &write_tx).await;
+        route(&msg, 0, &tracker, &event_tx, &state, &write_tx).await;
 
         let value = rx.await.unwrap();
         assert_eq!(value["data"], "hello");
@@ -773,7 +775,7 @@ mod tests {
 
         let payload = r#"{"data":"broadcast"}"#;
         let msg = build_message("urn:x-cast:com.example.custom", "web-5", "sender-0", payload);
-        route(&msg, &tracker, &event_tx, &state, &write_tx).await;
+        route(&msg, 0, &tracker, &event_tx, &state, &write_tx).await;
 
         let event = event_rx.try_recv().unwrap();
         match event {
@@ -797,11 +799,12 @@ mod tests {
             "sender-0",
             vec![1, 2, 3],
         );
-        route(&msg, &tracker, &event_tx, &state, &write_tx).await;
+        route(&msg, 0, &tracker, &event_tx, &state, &write_tx).await;
 
         assert_eq!(
             event_rx.try_recv().unwrap(),
             CastEvent::RawBinaryMessage {
+                connection: 0,
                 namespace: ns::NS_DEVICE_AUTH.to_string(),
                 source: "receiver-0".to_string(),
                 destination: "sender-0".to_string(),
@@ -820,7 +823,7 @@ mod tests {
 
         // Invalid JSON on receiver namespace — should not panic
         let msg = build_message(ns::NS_RECEIVER, "receiver-0", "sender-0", "not valid json");
-        route(&msg, &tracker, &event_tx, &state, &write_tx).await;
+        route(&msg, 0, &tracker, &event_tx, &state, &write_tx).await;
 
         // No events, no replies
         assert!(event_rx.try_recv().is_err());
@@ -842,7 +845,7 @@ mod tests {
             }
         });
         let msg = build_message(ns::NS_RECEIVER, "receiver-0", "sender-0", &payload.to_string());
-        route(&msg, &tracker, &event_tx, &state, &write_tx).await;
+        route(&msg, 0, &tracker, &event_tx, &state, &write_tx).await;
         // requestId 0 should not consume the pending entry for id 1
         assert!(tracker.resolve(1, serde_json::json!({})).await);
     }
