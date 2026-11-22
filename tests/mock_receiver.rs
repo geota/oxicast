@@ -256,3 +256,35 @@ async fn reports_the_device_tls_certificate() {
         "keeps the last connection's certificate after close"
     );
 }
+
+#[tokio::test]
+async fn the_device_certificate_follows_a_reconnect() {
+    use rustls::pki_types::CertificateDer;
+    use rustls::pki_types::pem::PemObject;
+    let der = |pem: &[u8]| CertificateDer::from_pem_slice(pem).expect("fixture").to_vec();
+    let first = der(include_bytes!("fixtures/mock_device.crt"));
+    let second = der(include_bytes!("fixtures/mock_device_2.crt"));
+
+    let port = start_receiver_changing_certificate().await;
+    let client = oxicast::CastClient::builder("127.0.0.1", port)
+        .auto_reconnect(false)
+        .connect()
+        .await
+        .expect("connect");
+    assert_eq!(client.peer_certificate(), Some(first));
+
+    client
+        .send_raw_no_reply(NS_TEST, "receiver-0", json!({"type": "DROP_CONNECTION"}))
+        .await
+        .expect("send drop trigger");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while client.is_connected() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("connection dropped");
+    client.reconnect().await.expect("reconnect");
+    assert_eq!(client.peer_certificate(), Some(second), "the new connection's certificate");
+    client.close().await.expect("close");
+}

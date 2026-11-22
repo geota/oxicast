@@ -211,3 +211,58 @@ pub async fn connect(port: u16) -> oxicast::CastClient {
         .await
         .expect("connect to mock receiver")
 }
+
+/// A mock receiver that accepts connections one after another, presenting the
+/// first fixture certificate on the first connection and the second on every
+/// later one. It answers PING and resets the connection on `DROP_CONNECTION`.
+pub async fn start_receiver_changing_certificate() -> u16 {
+    let config = |crt: &[u8], key: &[u8]| {
+        let certs = vec![CertificateDer::from_pem_slice(crt).expect("cert")];
+        let key = PrivateKeyDer::from_pem_slice(key).expect("key");
+        let config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(certs, key)
+            .expect("server config");
+        tokio_rustls::TlsAcceptor::from(Arc::new(config))
+    };
+    let first = config(
+        include_bytes!("../fixtures/mock_device.crt"),
+        include_bytes!("../fixtures/mock_device.key"),
+    );
+    let later = config(
+        include_bytes!("../fixtures/mock_device_2.crt"),
+        include_bytes!("../fixtures/mock_device_2.key"),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    tokio::spawn(async move {
+        for connection in 0.. {
+            let Ok((tcp, _)) = listener.accept().await else { return };
+            tcp.set_zero_linger().expect("linger");
+            let acceptor = if connection == 0 { &first } else { &later };
+            let Ok(mut tls) = acceptor.accept(tcp).await else { continue };
+            loop {
+                let mut len = [0u8; 4];
+                if tls.read_exact(&mut len).await.is_err() {
+                    break;
+                }
+                let mut buf = vec![0u8; u32::from_be_bytes(len) as usize];
+                if tls.read_exact(&mut buf).await.is_err() {
+                    break;
+                }
+                let msg = decode(&buf);
+                if msg.namespace == NS_TEST && msg.payload["type"] == "DROP_CONNECTION" {
+                    break; // drops `tls` -> RST
+                }
+                if msg.namespace == NS_HEARTBEAT && msg.payload["type"] == "PING" {
+                    let pong =
+                        encode(NS_HEARTBEAT, "receiver-0", "sender-0", &json!({"type": "PONG"}));
+                    if tls.write_all(&pong).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+    port
+}

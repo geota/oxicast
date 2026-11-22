@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- `CastClient::peer_certificate()`: the DER of the certificate the device presented in the TLS handshake, updated on reconnect. Cast devices use self-signed certificates, so it proves nothing on its own; device authentication signs the sender's nonce followed by this certificate.
+- `CastClient::peer_certificate()`: the DER of the certificate the device presented in the TLS handshake, updated on reconnect (tested with a reconnect that reaches a device with another certificate). Cast devices use self-signed certificates, so it proves nothing on its own; device authentication signs the sender's nonce followed by this certificate.
 
 ## [0.0.5] - 2026-11-11
 
