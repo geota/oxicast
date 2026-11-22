@@ -10,6 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - `CastClient::local_addr()` and `CastClient::peer_addr()`: the socket addresses of the connection to the device, updated on reconnect. On a host with several interfaces, `local_addr()` is the address the device reached this host on, which is the one to use in URLs for media served from this host.
 - `CastClientBuilder::adopt_broadcast_media_sessions` (default `true`, unchanged behaviour). With `false`, media commands keep targeting the media session this client loaded or joined instead of switching to any session announced in a `MEDIA_STATUS` broadcast, so a client never ends up controlling media another sender loaded on the same app.
+- Binary payloads: `CastClient::send_raw_binary()` sends a message with a binary payload, and every binary message received, on any namespace, arrives as the new `CastEvent::RawBinaryMessage { namespace, source, destination, payload }`. Binary payloads carry no `requestId`, so they are not correlated with requests.
+- `CastClientBuilder::first_message(namespace, destination, payload)`: a binary message sent before any other message on every connection, including reconnections, with `payload` called once per connection. This is how Cast senders send a device-authentication challenge (`urn:x-cast:com.google.cast.tp.deviceauth`), which must come first after the TLS handshake.
+- `CastClient::peer_certificate()`: the DER of the certificate the device presented in the TLS handshake, updated on reconnect. Cast devices use self-signed certificates, so it proves nothing on its own; device authentication signs the sender's nonce followed by this certificate.
 
 ### Fixed
 - A load the device rejects (an `IDLE` reply with no media) no longer replaces the media session that commands target.

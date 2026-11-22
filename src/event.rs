@@ -88,6 +88,23 @@ pub enum CastEvent {
         /// The JSON payload.
         payload: String,
     },
+
+    /// A message with a binary payload was received, on any namespace.
+    ///
+    /// Binary payloads carry no `requestId`, so they are never correlated with a
+    /// request; replies to [`send_raw_binary()`](crate::CastClient::send_raw_binary)
+    /// and to the builder's `first_message` (see
+    /// [`CastClient::builder()`](crate::CastClient::builder)) arrive here.
+    RawBinaryMessage {
+        /// The Cast namespace of the message.
+        namespace: String,
+        /// The sender ID.
+        source: String,
+        /// The destination ID.
+        destination: String,
+        /// The binary payload.
+        payload: Vec<u8>,
+    },
 }
 
 impl CastEvent {

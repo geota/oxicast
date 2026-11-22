@@ -124,6 +124,7 @@ pub(crate) struct ClientConfig {
     pub heartbeat_timeout: std::time::Duration,
     pub connect_timeout: std::time::Duration,
     pub verify_tls: bool,
+    pub first_message: Option<builder::FirstMessage>,
 }
 
 struct ClientInner {
@@ -154,6 +155,13 @@ struct ClientInner {
     session_id: tokio::sync::Mutex<Option<String>>,
     /// Local and peer address of the current connection, updated on reconnect.
     addrs: std::sync::Mutex<ConnectionAddrs>,
+    /// DER of the device's TLS certificate on the current connection, updated on reconnect.
+    peer_certificate: std::sync::Mutex<Option<Vec<u8>>>,
+}
+
+/// DER of the leaf certificate the device presented in the TLS handshake.
+fn peer_certificate_of(stream: &TlsStream<TcpStream>) -> Option<Vec<u8>> {
+    stream.get_ref().1.peer_certificates()?.first().map(|cert| cert.to_vec())
 }
 
 /// The socket addresses of a connection to a device.
@@ -205,10 +213,15 @@ impl CastClient {
         )
         .await?;
         let addrs = ConnectionAddrs::of(&tls_stream)?;
+        let peer_certificate = peer_certificate_of(&tls_stream);
         let (read_half, write_half) = io::split(tls_stream);
 
         // Create channels and shared state
         let (write_tx, write_rx) = mpsc::channel::<crate::proto::CastMessage>(64);
+        // Queued before any task starts, so nothing can be sent ahead of it.
+        if let Some(first) = &config.first_message {
+            write_tx.try_send(first.build()).map_err(|_| Error::Disconnected)?;
+        }
         let (event_tx, event_rx) = mpsc::channel::<CastEvent>(config.event_buffer_size);
         let request_tracker = Arc::new(RequestTracker::new(config.request_timeout));
         let (state_holder, watchers) = state::new_state();
@@ -280,6 +293,7 @@ impl CastClient {
             heartbeat_timeout: config.heartbeat_timeout,
             connect_timeout: config.connect_timeout,
             verify_tls: config.verify_tls,
+            first_message: config.first_message.clone(),
         };
 
         let client = Self {
@@ -300,6 +314,7 @@ impl CastClient {
                 transport_id: tokio::sync::Mutex::new(None),
                 session_id: tokio::sync::Mutex::new(None),
                 addrs: std::sync::Mutex::new(addrs),
+                peer_certificate: std::sync::Mutex::new(peer_certificate),
             }),
         };
 
@@ -355,6 +370,18 @@ impl CastClient {
     /// The device's address on the current connection (see [`local_addr`](Self::local_addr)).
     pub fn peer_addr(&self) -> std::net::SocketAddr {
         self.inner.addrs.lock().unwrap_or_else(|e| e.into_inner()).peer
+    }
+
+    /// The DER-encoded certificate the device presented in the TLS handshake of
+    /// the current connection.
+    ///
+    /// Cast devices present self-signed certificates, so this proves nothing on its
+    /// own. It is what Cast device authentication binds to: the device signs the
+    /// sender's nonce followed by this certificate. It is updated when the client
+    /// reconnects; after the connection closes it is the last connection's
+    /// certificate. `None` if the device presented none.
+    pub fn peer_certificate(&self) -> Option<Vec<u8>> {
+        self.inner.peer_certificate.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// Disconnect from the device.
@@ -462,6 +489,7 @@ impl CastClient {
         )
         .await?;
         let addrs = ConnectionAddrs::of(&tls_stream)?;
+        let peer_certificate = peer_certificate_of(&tls_stream);
         let (read_half, write_half) = io::split(tls_stream);
 
         // Re-check shutting_down after the TLS handshake. If disconnect() was
@@ -475,10 +503,15 @@ impl CastClient {
         // Event channels are NOT replaced — the same event_tx/event_rx pair stays alive
         // across reconnects so next_event() never sees a spurious None.
         let (new_write_tx, new_write_rx) = mpsc::channel::<crate::proto::CastMessage>(64);
+        // Queued before any task starts, so nothing can be sent ahead of it.
+        if let Some(first) = &config.first_message {
+            new_write_tx.try_send(first.build()).map_err(|_| Error::Disconnected)?;
+        }
         let cancel = self.inner.parent_cancel.child_token();
 
         *self.inner.write_tx.write().await = new_write_tx.clone();
         *self.inner.addrs.lock().unwrap_or_else(|e| e.into_inner()) = addrs;
+        *self.inner.peer_certificate.lock().unwrap_or_else(|e| e.into_inner()) = peer_certificate;
         let event_tx = self.inner.event_tx.read().await.clone();
         self.inner.alive.store(true, Ordering::Release);
         self.inner.shutting_down.store(false, Ordering::Release);
@@ -935,6 +968,23 @@ impl CastClient {
         self.send(msg).await
     }
 
+    /// Send a message with a binary payload, without waiting for a response.
+    ///
+    /// Binary payloads carry no `requestId`, so there is nothing to correlate a
+    /// reply with: replies arrive as [`CastEvent::RawBinaryMessage`]. To send a
+    /// binary message before anything else on a connection, such as a
+    /// device-authentication challenge, use the builder's `first_message`
+    /// (see [`builder()`](Self::builder)).
+    pub async fn send_raw_binary(
+        &self,
+        namespace: &str,
+        destination: &str,
+        payload: Vec<u8>,
+    ) -> Result<()> {
+        let msg = framing::build_binary_message(namespace, "sender-0", destination, payload);
+        self.send(msg).await
+    }
+
     // ── Internal ─────────────────────────────────────────────
 
     async fn send(&self, msg: crate::proto::CastMessage) -> Result<()> {
@@ -1006,8 +1056,11 @@ struct PayloadSummary {
 }
 
 impl PayloadSummary {
-    fn of(payload: Option<&str>) -> Self {
-        let payload = payload.unwrap_or("");
+    fn of(msg: &crate::proto::CastMessage) -> Self {
+        if let Some(binary) = &msg.payload_binary {
+            return Self { kind: String::new(), request_id: 0, len: binary.len() };
+        }
+        let payload = msg.payload_utf8.as_deref().unwrap_or("");
         let json = serde_json::from_str::<serde_json::Value>(payload).ok();
         let field = |k: &str| json.as_ref().and_then(|j| j.get(k).cloned());
         Self {
@@ -1041,7 +1094,7 @@ async fn writer_loop(
             msg = rx.recv() => {
                 match msg {
                     Some(msg) => {
-                        let summary = PayloadSummary::of(msg.payload_utf8.as_deref());
+                        let summary = PayloadSummary::of(&msg);
                         tracing::trace!(
                             ns = %msg.namespace,
                             dst = %msg.destination_id,
@@ -1108,7 +1161,7 @@ async fn reader_loop(mut reader: ReadHalf<TlsStream<TcpStream>>, ctx: ReaderCont
                 match result {
                     Ok(msg) => {
                         heartbeat::touch(&ctx.last_activity);
-                        let summary = PayloadSummary::of(msg.payload_utf8.as_deref());
+                        let summary = PayloadSummary::of(&msg);
                         tracing::trace!(
                             ns = %msg.namespace,
                             src = %msg.source_id,

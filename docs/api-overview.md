@@ -28,6 +28,12 @@ let client = CastClient::builder("192.168.1.100", 8009)
     .adopt_broadcast_media_sessions(true)
     .connect()
     .await?;
+
+// A binary message sent first on every connection, e.g. a device-auth challenge
+let client = CastClient::builder("192.168.1.100", 8009)
+    .first_message("urn:x-cast:com.google.cast.tp.deviceauth", "receiver-0", || challenge())
+    .connect()
+    .await?;
 ```
 
 | Method | Returns | Description |
@@ -38,6 +44,7 @@ let client = CastClient::builder("192.168.1.100", 8009)
 | `connection_state()` | `ConnectionState` | `Connected`, `Disconnected`, or `Reconnecting { attempt }` |
 | `local_addr()` | `SocketAddr` | This host's address on the connection to the device, e.g. for media URLs served from this host |
 | `peer_addr()` | `SocketAddr` | The device's address on the connection |
+| `peer_certificate()` | `Option<Vec<u8>>` | DER of the device's TLS certificate on the connection (self-signed; what device authentication binds to) |
 | `disconnect()` | `Result<()>` | Stops media, then graceful shutdown; closes event channel |
 | `stop_and_close()` | `Result<()>` | Same as `disconnect()`, explicit name |
 | `close()` | `Result<()>` | Graceful shutdown without stopping media (leave a joined session playing) |
@@ -180,6 +187,7 @@ let receiver_rx = client.watch_receiver_status(); // watch::Receiver<Option<Rece
 | `MediaSessionEnded { media_session_id, idle_reason }` | A media session ended |
 | `LoadFailed { item_id, detailed_error_code }` | The device failed to load media, also when it reports this after `load_media()` returned |
 | `RawMessage { namespace, source, destination, payload }` | Unhandled or custom namespace message |
+| `RawBinaryMessage { namespace, source, destination, payload }` | Any message with a binary payload (`Vec<u8>`) |
 
 ---
 
@@ -204,6 +212,14 @@ client.send_raw_no_reply(
 ```
 
 Custom namespace messages without a `requestId` arrive as `CastEvent::RawMessage`.
+
+Binary payloads (protobuf `payload_binary`) have no `requestId`, so they are sent without waiting and every binary message received arrives as `CastEvent::RawBinaryMessage`:
+
+```rust
+client.send_raw_binary("urn:x-cast:com.example.binary", &transport_id, bytes).await?;
+```
+
+To send a binary message before anything else on each connection, such as the device-authentication challenge, use the builder's `first_message` (see Connection).
 
 ---
 

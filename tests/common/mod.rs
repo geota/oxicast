@@ -19,6 +19,7 @@ pub const NS_HEARTBEAT: &str = "urn:x-cast:com.google.cast.tp.heartbeat";
 /// Test-only namespace: the mock resets the connection on `DROP_CONNECTION`,
 /// and on `BROADCAST_MEDIA_STATUS` sends an unsolicited `MEDIA_STATUS` from
 /// app `from` for media session `mediaSessionId`, as when another sender loads media.
+/// Binary messages on it are echoed back reversed, from `receiver-0`.
 pub const NS_TEST: &str = "urn:x-cast:oxicast.test";
 
 /// A message the client sent to the mock receiver.
@@ -27,6 +28,8 @@ pub struct Received {
     pub destination: String,
     pub namespace: String,
     pub payload: Value,
+    /// The payload of a binary message.
+    pub binary: Option<Vec<u8>>,
 }
 
 pub fn encode(namespace: &str, source: &str, dest: &str, payload: &Value) -> Vec<u8> {
@@ -42,11 +45,31 @@ pub fn encode(namespace: &str, source: &str, dest: &str, payload: &Value) -> Vec
     out
 }
 
+/// Like [`encode`], with a binary payload.
+pub fn encode_binary(namespace: &str, source: &str, dest: &str, payload: &[u8]) -> Vec<u8> {
+    let mut buf = Vec::new();
+    prost::encoding::int32::encode(1, &0, &mut buf);
+    prost::encoding::string::encode(2, &source.to_string(), &mut buf);
+    prost::encoding::string::encode(3, &dest.to_string(), &mut buf);
+    prost::encoding::string::encode(4, &namespace.to_string(), &mut buf);
+    prost::encoding::int32::encode(5, &1, &mut buf);
+    prost::encoding::bytes::encode(7, &payload.to_vec(), &mut buf);
+    let mut out = (buf.len() as u32).to_be_bytes().to_vec();
+    out.extend_from_slice(&buf);
+    out
+}
+
 pub fn decode(mut buf: &[u8]) -> Received {
     let (mut destination, mut namespace, mut payload) = (String::new(), String::new(), Value::Null);
+    let mut binary = None;
     while !buf.is_empty() {
         let (tag, wire_type) = decode_key(&mut buf).expect("key");
         match (tag, wire_type) {
+            (7, WireType::LengthDelimited) => {
+                let len = decode_varint(&mut buf).expect("len") as usize;
+                binary = Some(buf[..len].to_vec());
+                buf = &buf[len..];
+            }
             (3 | 4 | 6, WireType::LengthDelimited) => {
                 let len = decode_varint(&mut buf).expect("len") as usize;
                 let s = String::from_utf8(buf[..len].to_vec()).expect("utf8");
@@ -60,7 +83,7 @@ pub fn decode(mut buf: &[u8]) -> Received {
             _ => skip_field(wire_type, tag, &mut buf, Default::default()).expect("skip"),
         }
     }
-    Received { destination, namespace, payload }
+    Received { destination, namespace, payload, binary }
 }
 
 pub fn app(transport: &str, session: &str) -> Value {
@@ -135,6 +158,18 @@ pub async fn start_mock_receiver_on(
                     }],
                 });
                 if tls.write_all(&encode(NS_MEDIA, from, "*", &status)).await.is_err() {
+                    return;
+                }
+                continue;
+            }
+            if let (NS_TEST, Some(binary)) = (msg.namespace.as_str(), &msg.binary) {
+                let _ = seen_tx.send(msg.clone());
+                let reply: Vec<u8> = binary.iter().rev().copied().collect();
+                if tls
+                    .write_all(&encode_binary(NS_TEST, "receiver-0", "sender-0", &reply))
+                    .await
+                    .is_err()
+                {
                     return;
                 }
                 continue;
@@ -247,4 +282,65 @@ pub async fn connect(port: u16) -> oxicast::CastClient {
         .connect()
         .await
         .expect("connect to mock receiver")
+}
+
+/// A mock receiver that accepts one connection after another, so a client can
+/// reconnect. Returns its port and every non-heartbeat message the client sends,
+/// with the number of the connection it came on (from 0). It answers PING, resets
+/// the connection on `DROP_CONNECTION` and ignores everything else.
+pub async fn start_reconnectable_receiver() -> (u16, mpsc::UnboundedReceiver<(usize, Received)>) {
+    let certs = vec![
+        CertificateDer::from_pem_slice(include_bytes!("../fixtures/mock_device.crt"))
+            .expect("cert"),
+    ];
+    let key =
+        PrivateKeyDer::from_pem_slice(include_bytes!("../fixtures/mock_device.key")).expect("key");
+    let config = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .expect("server config");
+    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    let (seen_tx, seen_rx) = mpsc::unbounded_channel();
+
+    tokio::spawn(async move {
+        for connection in 0.. {
+            let Ok((tcp, _)) = listener.accept().await else { return };
+            tcp.set_zero_linger().expect("linger");
+            let Ok(mut tls) = acceptor.accept(tcp).await else { continue };
+            loop {
+                let mut len = [0u8; 4];
+                if tls.read_exact(&mut len).await.is_err() {
+                    break;
+                }
+                let mut buf = vec![0u8; u32::from_be_bytes(len) as usize];
+                if tls.read_exact(&mut buf).await.is_err() {
+                    break;
+                }
+                let msg = decode(&buf);
+                if msg.namespace == NS_HEARTBEAT {
+                    if msg.payload["type"] == "PING" {
+                        let pong = encode(
+                            NS_HEARTBEAT,
+                            "receiver-0",
+                            "sender-0",
+                            &json!({"type": "PONG"}),
+                        );
+                        if tls.write_all(&pong).await.is_err() {
+                            break;
+                        }
+                    }
+                    continue;
+                }
+                let drop_now = msg.namespace == NS_TEST && msg.payload["type"] == "DROP_CONNECTION";
+                let _ = seen_tx.send((connection, msg));
+                if drop_now {
+                    break; // drops `tls` -> RST
+                }
+            }
+        }
+    });
+
+    (port, seen_rx)
 }

@@ -26,6 +26,7 @@ fn classify_media_message(msg_type: &str) -> MediaMessageType {
     }
 }
 use crate::proto::CastMessage;
+use crate::proto::cast_message::PayloadType;
 use crate::state::StateHolder;
 use crate::types::*;
 
@@ -38,6 +39,15 @@ pub(crate) async fn route(
     write_tx: &mpsc::Sender<CastMessage>,
 ) {
     let namespace = &msg.namespace;
+    if msg.payload_type == PayloadType::Binary as i32 {
+        let _ = event_tx.try_send(CastEvent::RawBinaryMessage {
+            namespace: namespace.clone(),
+            source: msg.source_id.clone(),
+            destination: msg.destination_id.clone(),
+            payload: msg.payload_binary.clone().unwrap_or_default(),
+        });
+        return;
+    }
     let payload_str = msg.payload_utf8.as_deref().unwrap_or("");
 
     match namespace.as_str() {
@@ -774,6 +784,34 @@ mod tests {
             }
             other => panic!("expected RawMessage, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_binary_payload_emits_raw_binary() {
+        let (tracker, event_tx, mut event_rx, state, write_tx, mut write_rx) = setup().await;
+        let (_id, _rx) = tracker.register().await;
+
+        let msg = crate::client::framing::build_binary_message(
+            ns::NS_DEVICE_AUTH,
+            "receiver-0",
+            "sender-0",
+            vec![1, 2, 3],
+        );
+        route(&msg, &tracker, &event_tx, &state, &write_tx).await;
+
+        assert_eq!(
+            event_rx.try_recv().unwrap(),
+            CastEvent::RawBinaryMessage {
+                namespace: ns::NS_DEVICE_AUTH.to_string(),
+                source: "receiver-0".to_string(),
+                destination: "sender-0".to_string(),
+                payload: vec![1, 2, 3],
+            }
+        );
+        assert!(event_rx.try_recv().is_err());
+        assert!(write_rx.try_recv().is_err());
+        // A binary message never resolves a pending JSON request.
+        assert!(tracker.resolve(1, serde_json::json!({})).await);
     }
 
     #[tokio::test]

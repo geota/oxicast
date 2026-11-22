@@ -333,3 +333,114 @@ async fn a_rejected_load_does_not_replace_the_session_commands_target() {
 
     client.close().await.expect("close");
 }
+
+#[tokio::test]
+async fn binary_messages_round_trip_as_raw_binary_events() {
+    let (port, mut seen) = start_mock_receiver().await;
+    let client = connect(port).await;
+
+    client.send_raw_binary(NS_TEST, "receiver-0", vec![1, 2, 3]).await.expect("send binary");
+    let sent = expect_msg(&mut seen, |m| m.namespace == NS_TEST).await;
+    assert_eq!(sent.binary.as_deref(), Some(&[1, 2, 3][..]));
+    assert_eq!(sent.destination, "receiver-0");
+
+    let reply = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match client.next_event().await.expect("event stream open") {
+                oxicast::CastEvent::RawBinaryMessage {
+                    namespace,
+                    source,
+                    destination,
+                    payload,
+                } => {
+                    return (namespace, source, destination, payload);
+                }
+                _ => continue,
+            }
+        }
+    })
+    .await
+    .expect("binary reply");
+    assert_eq!(reply, (NS_TEST.into(), "receiver-0".into(), "sender-0".into(), vec![3, 2, 1]));
+
+    client.disconnect().await.expect("disconnect");
+}
+
+/// The next message the client sent to a reconnectable receiver, with its connection number.
+async fn next(rx: &mut mpsc::UnboundedReceiver<(usize, Received)>) -> (usize, Received) {
+    tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .expect("timed out")
+        .expect("receiver running")
+}
+
+#[tokio::test]
+async fn first_message_goes_out_before_anything_else_on_every_connection() {
+    let (port, mut seen) = start_reconnectable_receiver().await;
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0));
+    let counter = calls.clone();
+    let client = oxicast::CastClient::builder("127.0.0.1", port)
+        .auto_reconnect(false)
+        .request_timeout(Duration::from_secs(5))
+        .first_message(NS_TEST, "receiver-0", move || {
+            vec![counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed)]
+        })
+        .connect()
+        .await
+        .expect("connect");
+
+    let (connection, first) = next(&mut seen).await;
+    assert_eq!((connection, first.namespace.as_str()), (0, NS_TEST));
+    assert_eq!(first.binary, Some(vec![0]), "a payload made for this connection");
+    let (_, second) = next(&mut seen).await;
+    assert_eq!(
+        (second.namespace.as_str(), &second.payload["type"]),
+        (NS_CONNECTION, &json!("CONNECT"))
+    );
+
+    client
+        .send_raw_no_reply(NS_TEST, "receiver-0", json!({"type": "DROP_CONNECTION"}))
+        .await
+        .expect("send drop trigger");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while client.is_connected() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("connection dropped");
+    client.reconnect().await.expect("reconnect");
+
+    let (connection, first) = loop {
+        let (connection, msg) = next(&mut seen).await;
+        if connection == 1 {
+            break (connection, msg);
+        }
+    };
+    assert_eq!((connection, first.namespace.as_str()), (1, NS_TEST));
+    assert_eq!(first.binary, Some(vec![1]), "a fresh payload for the new connection");
+    let (_, second) = next(&mut seen).await;
+    assert_eq!(second.payload["type"], "CONNECT");
+
+    client.close().await.expect("close");
+}
+
+#[tokio::test]
+async fn reports_the_device_tls_certificate() {
+    use rustls::pki_types::CertificateDer;
+    use rustls::pki_types::pem::PemObject;
+
+    let (port, _seen) = start_mock_receiver().await;
+    let client = connect(port).await;
+
+    let expected = CertificateDer::from_pem_slice(include_bytes!("fixtures/mock_device.crt"))
+        .expect("fixture certificate");
+    assert_eq!(client.peer_certificate().as_deref(), Some(expected.as_ref()));
+
+    client.disconnect().await.expect("disconnect");
+    assert_eq!(
+        client.peer_certificate().as_deref(),
+        Some(expected.as_ref()),
+        "keeps the last connection's certificate after close"
+    );
+}
