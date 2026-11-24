@@ -105,6 +105,9 @@ pub struct MediaInfo {
     pub duration: Option<f64>,
     /// Optional metadata (title, images, etc.).
     pub metadata: Option<MediaMetadata>,
+    /// Tracks sent with the media, such as a WebVTT text track. Not read back from
+    /// MEDIA_STATUS, so it is empty in a [`MediaStatus`].
+    pub tracks: Vec<MediaTrack>,
 }
 
 impl MediaInfo {
@@ -118,6 +121,7 @@ impl MediaInfo {
             stream_type: StreamType::Buffered,
             duration: None,
             metadata: None,
+            tracks: Vec::new(),
         }
     }
 
@@ -160,6 +164,100 @@ impl MediaInfo {
             Some(m) => self.metadata(m),
             None => self,
         }
+    }
+
+    /// Set the tracks sent with the media, such as a WebVTT text track.
+    pub fn tracks(mut self, tracks: Vec<MediaTrack>) -> Self {
+        self.tracks = tracks;
+        self
+    }
+}
+
+/// A track of the media: a text track served beside a video, such as WebVTT subtitles,
+/// or an audio or video track. Sent in the LOAD request's `media.tracks`
+/// ([`MediaInfo::tracks`]); build a subtitles track with [`MediaTrack::subtitles`], and turn
+/// tracks on with
+/// [`CastClient::load_media_with_active_tracks`](crate::CastClient::load_media_with_active_tracks)
+/// or [`CastClient::edit_tracks_info`](crate::CastClient::edit_tracks_info).
+#[derive(Debug, Clone, PartialEq)]
+pub struct MediaTrack {
+    /// Unique among the media's tracks; what `activeTrackIds` names.
+    pub track_id: u32,
+    /// Text, audio or video.
+    pub track_type: TrackType,
+    /// For a text track: what it holds.
+    pub subtype: Option<TextTrackType>,
+    /// The track's URL, for a track that isn't inside the media itself.
+    pub content_id: Option<String>,
+    /// MIME type of `content_id`, such as `text/vtt`.
+    pub content_type: Option<String>,
+    /// An RFC 5646 language tag, such as `en` or `ja`.
+    pub language: Option<String>,
+    /// A name for the user.
+    pub name: Option<String>,
+}
+
+/// The kind of a [`MediaTrack`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TrackType {
+    /// Subtitles, captions and the like.
+    Text,
+    /// An audio track.
+    Audio,
+    /// A video track.
+    Video,
+}
+
+/// What a text [`MediaTrack`] holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TextTrackType {
+    /// Translations of the dialogue.
+    Subtitles,
+    /// Dialogue and sounds, for viewers who can't hear them.
+    Captions,
+    /// Descriptions of the picture, for viewers who can't see it.
+    Descriptions,
+    /// Chapter titles.
+    Chapters,
+    /// Data for the app, not shown.
+    Metadata,
+}
+
+impl MediaTrack {
+    /// A subtitles text track at `content_id`, of MIME type `content_type` (such as
+    /// `text/vtt`), in `language`, an RFC 5646 tag such as `en`: Cast requires a language for
+    /// subtitles.
+    ///
+    /// ```
+    /// # use oxicast::MediaTrack;
+    /// let track = MediaTrack::subtitles(1, "http://192.168.1.2/subs.vtt", "text/vtt", "en")
+    ///     .name("English");
+    /// ```
+    #[must_use]
+    pub fn subtitles(
+        track_id: u32,
+        content_id: impl Into<String>,
+        content_type: impl Into<String>,
+        language: impl Into<String>,
+    ) -> Self {
+        Self {
+            track_id,
+            track_type: TrackType::Text,
+            subtype: Some(TextTrackType::Subtitles),
+            content_id: Some(content_id.into()),
+            content_type: Some(content_type.into()),
+            language: Some(language.into()),
+            name: None,
+        }
+    }
+
+    /// Set the name shown to the user.
+    #[must_use]
+    pub fn name(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
+        self
     }
 }
 
@@ -447,6 +545,7 @@ impl MediaInfo {
                 studio: None,
                 images: vec![],
             }),
+            tracks: Vec::new(),
         }
     }
 
@@ -460,6 +559,7 @@ impl MediaInfo {
             stream_type: StreamType::Live,
             duration: None,
             metadata: None,
+            tracks: Vec::new(),
         }
     }
 }

@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Text tracks: `MediaInfo::tracks` with `MediaTrack` (`MediaTrack::subtitles`, `TrackType`, `TextTrackType`), sent as `media.tracks` in LOAD, QUEUE_LOAD and QUEUE_INSERT; `CastClient::load_media_with_active_tracks` to load with exactly the given tracks on (`activeTrackIds`); and `CastClient::edit_tracks_info` to turn tracks on or off without reloading. `load_media()` is unchanged and sends no `activeTrackIds`. The returned `MediaStatus` doesn't report tracks yet.
+- `Error::InvalidPlayerState` for an `INVALID_PLAYER_STATE` reply, which previously left the request to time out.
+
+### Changed
+- **Breaking:** `MediaInfo` has a new public field, `tracks`; code constructing it with a struct literal needs to set it (`Vec::new()`). It isn't read back from MEDIA_STATUS.
+
 ## [0.0.5] - 2026-11-11
 
 ### Added

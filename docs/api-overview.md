@@ -88,6 +88,8 @@ let status = client.media_status().await?;
 | Method | Returns | Description |
 |--------|---------|-------------|
 | `load_media(media, autoplay, start_time, custom_data)` | `Result<MediaStatus>` | Load media onto the device |
+| `load_media_with_active_tracks(media, autoplay, start_time, active_track_ids, custom_data)` | `Result<MediaStatus>` | Load media and turn on exactly the given tracks |
+| `edit_tracks_info(active_track_ids)` | `Result<MediaStatus>` | Turn tracks on or off without reloading |
 | `play()` | `Result<MediaStatus>` | Resume playback |
 | `pause()` | `Result<MediaStatus>` | Pause playback |
 | `seek(position)` | `Result<MediaStatus>` | Seek to position in seconds |
@@ -115,6 +117,21 @@ let media = MediaInfo::new(url, "video/mp4")
 let media = MediaInfo::movie(url, "video/mp4", "My Movie");
 let media = MediaInfo::live(url, "application/x-mpegURL");
 ```
+
+### Text tracks
+
+```rust
+// WebVTT subtitles served beside the video, loaded on
+let media = MediaInfo::new(url, "video/mp4")
+    .tracks(vec![MediaTrack::subtitles(1, vtt_url, "text/vtt", "en")]);
+client.load_media_with_active_tracks(&media, true, 0.0, &[1], None).await?;
+
+// Off, and on again, with no reload
+client.edit_tracks_info(&[]).await?;
+client.edit_tracks_info(&[1]).await?;
+```
+
+Cast requires a language for subtitles. A receiver fetches text tracks with CORS, so the server must send CORS headers for the track and the media. The returned `MediaStatus` doesn't report the tracks or which are on. Editing the tracks of media that can't change them now gives `Error::InvalidPlayerState`.
 
 ### Metadata types
 

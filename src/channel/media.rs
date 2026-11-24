@@ -5,7 +5,9 @@ use crate::client::framing::build_message;
 use crate::proto::CastMessage;
 use crate::types::*;
 
-/// Build a LOAD media request.
+/// Build a LOAD media request. `activeTrackIds` is sent only when `active_track_ids` is
+/// `Some`.
+#[allow(clippy::too_many_arguments)]
 pub fn load(
     request_id: u32,
     transport_id: &str,
@@ -13,6 +15,7 @@ pub fn load(
     media: &MediaInfo,
     autoplay: bool,
     current_time: f64,
+    active_track_ids: Option<&[u32]>,
     custom_data: Option<&serde_json::Value>,
 ) -> CastMessage {
     let mut media_obj = serde_json::json!({
@@ -34,8 +37,11 @@ pub fn load(
     if let Some(ref meta) = media.metadata {
         media_obj["metadata"] = serialize_metadata(meta);
     }
+    if !media.tracks.is_empty() {
+        media_obj["tracks"] = serialize_tracks(&media.tracks);
+    }
 
-    let payload = serde_json::json!({
+    let mut payload = serde_json::json!({
         "type": ns::MSG_LOAD,
         "requestId": request_id,
         "sessionId": session_id,
@@ -44,6 +50,9 @@ pub fn load(
         "currentTime": current_time,
         "customData": custom_data.unwrap_or(&serde_json::json!({})),
     });
+    if let Some(active) = active_track_ids {
+        payload["activeTrackIds"] = serde_json::json!(active);
+    }
 
     build_message(ns::NS_MEDIA, ns::SENDER_ID, transport_id, &payload.to_string())
 }
@@ -124,11 +133,67 @@ fn serialize_queue_item(item: &QueueItem) -> serde_json::Value {
     if let Some(ref meta) = item.media.metadata {
         media_obj["metadata"] = serialize_metadata(meta);
     }
+    if !item.media.tracks.is_empty() {
+        media_obj["tracks"] = serialize_tracks(&item.media.tracks);
+    }
     serde_json::json!({
         "media": media_obj,
         "autoplay": item.autoplay,
         "startTime": item.start_time,
     })
+}
+
+/// Build an EDIT_TRACKS_INFO request: the tracks to make active, every other one off.
+pub fn edit_tracks_info(
+    request_id: u32,
+    transport_id: &str,
+    media_session_id: i32,
+    active_track_ids: &[u32],
+) -> CastMessage {
+    let payload = serde_json::json!({
+        "type": ns::MSG_EDIT_TRACKS_INFO,
+        "requestId": request_id,
+        "mediaSessionId": media_session_id,
+        "activeTrackIds": active_track_ids,
+    });
+    build_message(ns::NS_MEDIA, ns::SENDER_ID, transport_id, &payload.to_string())
+}
+
+fn serialize_tracks(tracks: &[MediaTrack]) -> serde_json::Value {
+    serde_json::Value::Array(tracks.iter().map(serialize_track).collect())
+}
+
+fn serialize_track(track: &MediaTrack) -> serde_json::Value {
+    let mut t = serde_json::json!({
+        "trackId": track.track_id,
+        "type": match track.track_type {
+            TrackType::Text => "TEXT",
+            TrackType::Audio => "AUDIO",
+            TrackType::Video => "VIDEO",
+        },
+    });
+    if let Some(subtype) = track.subtype {
+        t["subtype"] = serde_json::json!(match subtype {
+            TextTrackType::Subtitles => "SUBTITLES",
+            TextTrackType::Captions => "CAPTIONS",
+            TextTrackType::Descriptions => "DESCRIPTIONS",
+            TextTrackType::Chapters => "CHAPTERS",
+            TextTrackType::Metadata => "METADATA",
+        });
+    }
+    if let Some(ref id) = track.content_id {
+        t["trackContentId"] = serde_json::json!(id);
+    }
+    if let Some(ref content_type) = track.content_type {
+        t["trackContentType"] = serde_json::json!(content_type);
+    }
+    if let Some(ref language) = track.language {
+        t["language"] = serde_json::json!(language);
+    }
+    if let Some(ref name) = track.name {
+        t["name"] = serde_json::json!(name);
+    }
+    t
 }
 
 /// Build a QUEUE_LOAD request.
@@ -312,7 +377,7 @@ mod tests {
             studio: Some("Studio X".into()),
             images: vec![Image { url: "http://img.jpg".into(), width: Some(800), height: None }],
         });
-        let msg = load(1, "t", "s", &media, true, 0.0, None);
+        let msg = load(1, "t", "s", &media, true, 0.0, None, None);
         let p = parse_payload(&msg);
         assert_eq!(p["media"]["metadata"]["metadataType"], 1);
         assert_eq!(p["media"]["metadata"]["title"], "Test Movie");
@@ -322,9 +387,66 @@ mod tests {
     }
 
     #[test]
+    fn test_load_without_tracks_sends_neither_field() {
+        let msg = load(1, "t", "s", &MediaInfo::new("url", "video/mp4"), true, 0.0, None, None);
+        let p = parse_payload(&msg);
+        assert!(p["media"].get("tracks").is_none());
+        assert!(p.get("activeTrackIds").is_none());
+    }
+
+    #[test]
+    fn test_load_with_a_text_track() {
+        let track = MediaTrack::subtitles(1, "http://host/subs.vtt", "text/vtt", "en");
+        let media = MediaInfo::new("url", "video/mp4").tracks(vec![track]);
+        let p = parse_payload(&load(1, "t", "s", &media, true, 0.0, Some(&[1]), None));
+        let t = &p["media"]["tracks"][0];
+        assert_eq!(t["trackId"], 1);
+        assert_eq!(t["type"], "TEXT");
+        assert_eq!(t["subtype"], "SUBTITLES");
+        assert_eq!(t["trackContentId"], "http://host/subs.vtt");
+        assert_eq!(t["trackContentType"], "text/vtt");
+        assert_eq!(t["language"], "en");
+        assert!(t.get("name").is_none());
+        assert_eq!(p["activeTrackIds"], serde_json::json!([1]));
+        // Loaded with every track off.
+        let off = parse_payload(&load(1, "t", "s", &media, true, 0.0, Some(&[]), None));
+        assert_eq!(off["activeTrackIds"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn test_queue_load_includes_tracks() {
+        let track =
+            MediaTrack::subtitles(2, "http://host/subs.vtt", "text/vtt", "ja").name("日本語");
+        let media = MediaInfo::new("url", "video/mp4").tracks(vec![track]);
+        let items = [QueueItem { media, autoplay: true, start_time: 0.0 }];
+        let p = parse_payload(&queue_load(1, "t", "s", &items, 0, RepeatMode::RepeatOff));
+        let t = &p["items"][0]["media"]["tracks"][0];
+        assert_eq!(t["trackId"], 2);
+        assert_eq!(t["language"], "ja");
+        assert_eq!(t["name"], "日本語");
+        let p = parse_payload(&queue_insert(1, "t", 5, &items, None));
+        assert_eq!(p["items"][0]["media"]["tracks"][0]["subtype"], "SUBTITLES");
+        // Plain load_media sends the tracks and leaves the choice to the receiver.
+        let p = parse_payload(&load(1, "t", "s", &items[0].media, true, 0.0, None, None));
+        assert_eq!(p["media"]["tracks"][0]["trackId"], 2);
+        assert!(p.get("activeTrackIds").is_none());
+    }
+
+    #[test]
+    fn test_edit_tracks_info() {
+        let p = parse_payload(&edit_tracks_info(7, "t", 42, &[1]));
+        assert_eq!(p["type"], "EDIT_TRACKS_INFO");
+        assert_eq!(p["requestId"], 7);
+        assert_eq!(p["mediaSessionId"], 42);
+        assert_eq!(p["activeTrackIds"], serde_json::json!([1]));
+        let off = parse_payload(&edit_tracks_info(8, "t", 42, &[]));
+        assert_eq!(off["activeTrackIds"], serde_json::json!([]));
+    }
+
+    #[test]
     fn test_load_with_duration() {
         let media = MediaInfo::new("url", "video/mp4").duration(120.5);
-        let msg = load(1, "t", "s", &media, false, 10.0, None);
+        let msg = load(1, "t", "s", &media, false, 10.0, None, None);
         let p = parse_payload(&msg);
         assert_eq!(p["media"]["duration"], 120.5);
         assert_eq!(p["autoplay"], false);
@@ -334,7 +456,7 @@ mod tests {
     #[test]
     fn test_load_live_stream_type() {
         let media = MediaInfo::live("url", "application/x-mpegURL");
-        let msg = load(1, "t", "s", &media, true, 0.0, None);
+        let msg = load(1, "t", "s", &media, true, 0.0, None, None);
         let p = parse_payload(&msg);
         assert_eq!(p["media"]["streamType"], "LIVE");
     }
@@ -347,7 +469,7 @@ mod tests {
             "realDuration": 7200.0,
             "isLive": false
         });
-        let msg = load(1, "t", "s", &media, true, 0.0, Some(&custom));
+        let msg = load(1, "t", "s", &media, true, 0.0, None, Some(&custom));
         let p = parse_payload(&msg);
         assert_eq!(p["customData"]["positionOffset"], 300.0);
         assert_eq!(p["customData"]["realDuration"], 7200.0);
@@ -357,7 +479,7 @@ mod tests {
     #[test]
     fn test_load_without_custom_data() {
         let media = MediaInfo::new("url", "video/mp4");
-        let msg = load(1, "t", "s", &media, true, 0.0, None);
+        let msg = load(1, "t", "s", &media, true, 0.0, None, None);
         let p = parse_payload(&msg);
         assert_eq!(p["customData"], serde_json::json!({}));
     }

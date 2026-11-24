@@ -236,3 +236,35 @@ async fn disconnect_reports_a_single_event_when_the_device_vanishes_meanwhile() 
     }
     assert_eq!(disconnects, vec![None], "only the terminal Disconnected(None) of disconnect()");
 }
+
+#[tokio::test]
+async fn text_tracks_load_on_and_turn_off_without_a_reload() {
+    use oxicast::{MediaInfo, MediaTrack};
+    let (port, mut seen) = start_mock_receiver().await;
+    let client = connect(port).await;
+    let status = client.receiver_status().await.expect("receiver status");
+    let app1 = status.applications.iter().find(|a| a.transport_id == "app-1").expect("app-1");
+    client.join_session(app1).await.expect("join");
+
+    let media = MediaInfo::new("http://example.com/v.mp4", "video/mp4")
+        .tracks(vec![MediaTrack::subtitles(1, "http://example.com/subs.vtt", "text/vtt", "en")]);
+    let loaded =
+        client.load_media_with_active_tracks(&media, true, 0.0, &[1], None).await.expect("load");
+    assert_eq!(loaded.media_session_id, 11);
+    let load = expect_msg(&mut seen, |m| m.payload["type"] == "LOAD").await;
+    assert_eq!(load.destination, "app-1");
+    assert_eq!(load.payload["media"]["tracks"][0]["trackContentId"], "http://example.com/subs.vtt");
+    assert_eq!(load.payload["media"]["tracks"][0]["language"], "en");
+    assert_eq!(load.payload["activeTrackIds"], json!([1]));
+
+    client.edit_tracks_info(&[]).await.expect("off");
+    let edit = expect_msg(&mut seen, |m| m.payload["type"] == "EDIT_TRACKS_INFO").await;
+    assert_eq!(edit.destination, "app-1");
+    assert_eq!(edit.payload["mediaSessionId"], 11);
+    assert_eq!(edit.payload["activeTrackIds"], json!([]));
+
+    // The mock rejects an edit naming track 99 as a receiver whose media ended would.
+    let refused = client.edit_tracks_info(&[99]).await;
+    assert!(matches!(refused, Err(oxicast::Error::InvalidPlayerState { .. })), "{refused:?}");
+    client.disconnect().await.expect("disconnect");
+}

@@ -70,6 +70,10 @@ pub const MSG_LOAD_FAILED: &str = "LOAD_FAILED";
 pub const MSG_LOAD_CANCELLED: &str = "LOAD_CANCELLED";
 /// Invalid request error.
 pub const MSG_INVALID_REQUEST: &str = "INVALID_REQUEST";
+/// The request can't be done in the media's current state.
+pub const MSG_INVALID_PLAYER_STATE: &str = "INVALID_PLAYER_STATE";
+/// Set which tracks are active, such as turning a text track on or off.
+pub const MSG_EDIT_TRACKS_INFO: &str = "EDIT_TRACKS_INFO";
 /// Load a media queue.
 pub const MSG_QUEUE_LOAD: &str = "QUEUE_LOAD";
 /// Insert items into the queue.

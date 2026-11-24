@@ -91,5 +91,6 @@ pub use error::{Error, Result};
 pub use event::CastEvent;
 pub use types::{
     Application, Capability, CastApp, DeviceInfo, IdleReason, Image, MediaInfo, MediaMetadata,
-    MediaStatus, PlayerState, QueueItem, ReceiverStatus, RepeatMode, StreamType, Volume,
+    MediaStatus, MediaTrack, PlayerState, QueueItem, ReceiverStatus, RepeatMode, StreamType,
+    TextTrackType, TrackType, Volume,
 };

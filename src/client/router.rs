@@ -13,6 +13,7 @@ enum MediaMessageType {
     LoadFailed,
     LoadCancelled,
     InvalidRequest,
+    InvalidPlayerState,
     Unknown,
 }
 
@@ -22,6 +23,7 @@ fn classify_media_message(msg_type: &str) -> MediaMessageType {
         ns::MSG_LOAD_FAILED => MediaMessageType::LoadFailed,
         ns::MSG_LOAD_CANCELLED => MediaMessageType::LoadCancelled,
         ns::MSG_INVALID_REQUEST => MediaMessageType::InvalidRequest,
+        ns::MSG_INVALID_PLAYER_STATE => MediaMessageType::InvalidPlayerState,
         _ => MediaMessageType::Unknown,
     }
 }
@@ -156,10 +158,10 @@ pub(crate) async fn route(
                             }
                         }
                     }
-                    MediaMessageType::InvalidRequest => {
+                    MediaMessageType::InvalidRequest | MediaMessageType::InvalidPlayerState => {
                         let reason =
                             json.get("reason").and_then(|r| r.as_str()).unwrap_or("unknown");
-                        tracing::debug!("invalid request: {reason}");
+                        tracing::debug!("invalid request or player state: {reason}");
                         if let Some(request_id) = json.get("requestId").and_then(|r| r.as_u64()) {
                             if request_id > 0 {
                                 request_tracker.resolve(request_id as u32, json.clone()).await;
@@ -315,6 +317,7 @@ fn parse_media_status(json: &serde_json::Value) -> Option<MediaStatus> {
                 },
                 duration: m.get("duration").and_then(|d| d.as_f64()).filter(|d| *d > 0.0),
                 metadata: m.get("metadata").and_then(parse_metadata),
+                tracks: Vec::new(),
             })
         }),
     })

@@ -141,6 +141,16 @@ pub async fn start_mock_receiver_on(
                         }
                     }),
                 )),
+                // A receiver whose media can't change tracks now.
+                (NS_MEDIA, Some("EDIT_TRACKS_INFO"))
+                    if msg.payload["activeTrackIds"] == json!([99]) =>
+                {
+                    Some((
+                        NS_MEDIA,
+                        "app-1",
+                        json!({"type": "INVALID_PLAYER_STATE", "requestId": request_id}),
+                    ))
+                }
                 (NS_MEDIA, Some(_)) if request_id != json!(0) => {
                     let (transport, session_id) = match msg.destination.as_str() {
                         "app-1" => ("app-1", 11),

@@ -29,6 +29,9 @@ use crate::types::{IdleReason, MediaStatus, ReceiverStatus};
 /// ```
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
+// `MediaStatus` is the most common event, so boxing it would cost an allocation per status
+// (and break matching on it) to save memory on rare ones.
+#[allow(clippy::large_enum_variant)]
 pub enum CastEvent {
     /// Successfully connected to the device.
     Connected,
