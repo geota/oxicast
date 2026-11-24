@@ -745,6 +745,48 @@ impl CastClient {
         current_time: f64,
         custom_data: Option<&serde_json::Value>,
     ) -> Result<MediaStatus> {
+        self.load_with(media, autoplay, current_time, None, custom_data).await
+    }
+
+    /// [`load_media`](Self::load_media), turning on exactly the tracks of
+    /// [`MediaInfo::tracks`] in `active_track_ids` (`activeTrackIds`); an empty list loads
+    /// with every track off. `load_media` leaves the choice to the receiver. The returned
+    /// status doesn't report the tracks or which are on: this sends the choice only.
+    ///
+    /// ```no_run
+    /// # use oxicast::{CastClient, MediaInfo, MediaTrack};
+    /// # async fn run(client: &CastClient) -> oxicast::Result<()> {
+    /// // WebVTT subtitles served beside the video, loaded on. A receiver fetches them with
+    /// // CORS, so the server must send CORS headers for the track and the media.
+    /// let subtitles = MediaTrack::subtitles(1, "http://192.168.1.2/subs.vtt", "text/vtt", "en");
+    /// let media = MediaInfo::new("http://192.168.1.2/video.mp4", "video/mp4").tracks(vec![subtitles]);
+    /// client.load_media_with_active_tracks(&media, true, 0.0, &[1], None).await?;
+    ///
+    /// // Off, and on again, without a reload.
+    /// client.edit_tracks_info(&[]).await?;
+    /// client.edit_tracks_info(&[1]).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn load_media_with_active_tracks(
+        &self,
+        media: &MediaInfo,
+        autoplay: bool,
+        current_time: f64,
+        active_track_ids: &[u32],
+        custom_data: Option<&serde_json::Value>,
+    ) -> Result<MediaStatus> {
+        self.load_with(media, autoplay, current_time, Some(active_track_ids), custom_data).await
+    }
+
+    async fn load_with(
+        &self,
+        media: &MediaInfo,
+        autoplay: bool,
+        current_time: f64,
+        active_track_ids: Option<&[u32]>,
+        custom_data: Option<&serde_json::Value>,
+    ) -> Result<MediaStatus> {
         let transport_id = self.get_transport_id().await?;
         let session_id = self.get_session_id().await?;
 
@@ -756,6 +798,7 @@ impl CastClient {
             media,
             autoplay,
             current_time,
+            active_track_ids,
             custom_data,
         ))
         .await?;
@@ -814,6 +857,22 @@ impl CastClient {
         let json = self.inner.request_tracker.wait_for(id, rx).await?;
         Self::check_device_error(&json)?;
         self.inner.state.media_session_id.store(0, std::sync::atomic::Ordering::Relaxed);
+        router::parse_media_status_from_json(&json).ok_or(Error::NoMediaSession)
+    }
+
+    /// Turn on exactly the tracks of the current media in `active_track_ids`, and every
+    /// other track off: an empty list hides the text tracks. Sent to the current media
+    /// session, without reloading the media. The returned status doesn't report which
+    /// tracks are on. Media that can't change tracks now, such as media that has ended, gives
+    /// [`Error::InvalidPlayerState`].
+    pub async fn edit_tracks_info(&self, active_track_ids: &[u32]) -> Result<MediaStatus> {
+        let transport_id = self.get_transport_id().await?;
+        let msid = self.get_media_session_id().await?;
+        let (id, rx) = self.inner.request_tracker.register().await;
+        self.send(channel::media::edit_tracks_info(id, &transport_id, msid, active_track_ids))
+            .await?;
+        let json = self.inner.request_tracker.wait_for(id, rx).await?;
+        Self::check_device_error(&json)?;
         router::parse_media_status_from_json(&json).ok_or(Error::NoMediaSession)
     }
 
@@ -1028,6 +1087,10 @@ impl CastClient {
                 let reason = json.get("reason").and_then(|r| r.as_str()).unwrap_or("unknown");
                 let req_id = json.get("requestId").and_then(|r| r.as_u64()).unwrap_or(0);
                 Err(Error::InvalidRequest { request_id: req_id as u32, reason: reason.to_string() })
+            }
+            Some("INVALID_PLAYER_STATE") => {
+                let req_id = json.get("requestId").and_then(|r| r.as_u64()).unwrap_or(0);
+                Err(Error::InvalidPlayerState { request_id: req_id as u32 })
             }
             Some("LAUNCH_ERROR") => {
                 let reason = json.get("reason").and_then(|r| r.as_str()).unwrap_or("unknown");

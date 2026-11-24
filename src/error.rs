@@ -59,6 +59,14 @@ pub enum Error {
         reason: String,
     },
 
+    /// The device can't do the request in the media's current state, such as editing the
+    /// tracks of media that has ended (`INVALID_PLAYER_STATE`).
+    #[error("invalid player state for request {request_id}")]
+    InvalidPlayerState {
+        /// The request ID that was rejected.
+        request_id: u32,
+    },
+
     /// The payload passed to `send_raw()` is not a JSON object.
     #[error("payload must be a JSON object")]
     InvalidPayload,

@@ -14,6 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `CastClient::connection_number()`: 0 for the first connection, one more on each reconnect.
 - `CastClientBuilder::first_message(namespace, destination, payload)`: a binary message sent before any other message on every connection, including reconnections, with `payload` called once per connection with the connection's number. This is how Cast senders send a device-authentication challenge (`urn:x-cast:com.google.cast.tp.deviceauth`), which must come first after the TLS handshake.
 - `CastClient::peer_certificate()`: the DER of the certificate the device presented in the TLS handshake, updated on reconnect (tested with a reconnect that reaches a device with another certificate). Cast devices use self-signed certificates, so it proves nothing on its own; device authentication signs the sender's nonce followed by this certificate.
+- Text tracks: `MediaInfo::tracks` with `MediaTrack` (`MediaTrack::subtitles`, `TrackType`, `TextTrackType`), sent as `media.tracks` in LOAD, QUEUE_LOAD and QUEUE_INSERT; `CastClient::load_media_with_active_tracks` to load with exactly the given tracks on (`activeTrackIds`); and `CastClient::edit_tracks_info` to turn tracks on or off without reloading. `load_media()` is unchanged and sends no `activeTrackIds`. The returned `MediaStatus` doesn't report tracks yet.
+- `Error::InvalidPlayerState` for an `INVALID_PLAYER_STATE` reply, which previously left the request to time out.
+
+### Changed
+- **Breaking:** `MediaInfo` has a new public field, `tracks`; code constructing it with a struct literal needs to set it (`Vec::new()`). It isn't read back from MEDIA_STATUS.
 
 ### Fixed
 - A load the device rejects (an `IDLE` reply with no media) no longer replaces the media session that commands target.
